@@ -3,6 +3,7 @@ package wikibrief
 import (
 	"encoding/xml"
 	"io"
+	"sort"
 	"time"
 
 	"github.com/pkg/errors"
@@ -46,9 +47,10 @@ type Summary struct {
 
 //Revision represent a revision of a page.
 type Revision struct {
-	ID, UserID, IsRevert uint32
-	Weight               float64
-	Timestamp            time.Time
+	ID, UserID uint32
+	Weight     float64
+	SHA1       string
+	Timestamp  time.Time
 }
 
 //AnonimousUserID is the UserID value assumed by revisions done by an anonimous user
@@ -161,9 +163,8 @@ func (bs *bTitled) SetPageID(t xml.StartElement) (be builder, err error) {
 
 	if bs.IsValidPage(pageID) {
 		be = &bSummary{
-			bTitled:       *bs,
-			PageID:        pageID,
-			SHA12SerialID: make(map[string]uint32, 16),
+			bTitled: *bs,
+			PageID:  pageID,
 		}
 	} else {
 		bs.Decoder.Skip() //skip page
@@ -189,9 +190,6 @@ type bSummary struct {
 	PageID uint32
 
 	revisions []Revision
-	//SHA12SerialID maps sha1 to the last revision serial number in which it appears
-	SHA12SerialID   map[string]uint32
-	currentSerialID uint32
 }
 
 func (bs *bSummary) SetPageID(t xml.StartElement) (be builder, err error) {
@@ -210,25 +208,11 @@ func (bs *bSummary) AddRevision(t xml.StartElement) (be builder, err error) {
 	const layout = "2006-01-02T15:04:05Z"
 	timestamp, err = time.Parse(layout, r.Timestamp)
 
-	//count revisions reverted
-	var isRevert uint32
-	previousID, ok := bs.SHA12SerialID[r.SHA1]
-	switch {
-	case ok:
-		isRevert = bs.currentSerialID - previousID - 1
-		fallthrough
-	case len(r.SHA1) == 31:
-		bs.SHA12SerialID[r.SHA1] = bs.currentSerialID
-		fallthrough
-	default:
-		bs.currentSerialID++
-	}
-
 	bs.revisions = append(bs.revisions, Revision{
 		ID:        r.ID,
 		UserID:    r.Contributor.ID,
-		IsRevert:  isRevert,
 		Weight:    bs.Weighter(r.Text),
+		SHA1:      r.SHA1,
 		Timestamp: timestamp,
 	})
 
@@ -236,6 +220,7 @@ func (bs *bSummary) AddRevision(t xml.StartElement) (be builder, err error) {
 	return
 }
 func (bs *bSummary) End() (be builder, s Summary, err error) {
+	sort.Sort(byTimeAndID(bs.revisions)) //Wikipedia BUG: in the dump some edits are not sorted.
 	s = Summary{bs.Title, bs.PageID, bs.revisions}
 	be = bs.New()
 	return
@@ -266,4 +251,18 @@ func xmlEvent(t xml.Token) string {
 	default:
 		return ""
 	}
+}
+
+type byTimeAndID []Revision
+
+func (p byTimeAndID) Len() int {
+	return len(p)
+}
+
+func (p byTimeAndID) Less(i, j int) bool {
+	return p[i].Timestamp.Before(p[j].Timestamp) && p[i].ID < p[j].ID
+}
+
+func (p byTimeAndID) Swap(i, j int) {
+	p[i], p[j] = p[j], p[i]
 }
