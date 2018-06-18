@@ -3,7 +3,6 @@ package wikibrief
 import (
 	"encoding/xml"
 	"io"
-	"sort"
 	"time"
 
 	"github.com/pkg/errors"
@@ -163,8 +162,9 @@ func (bs *bTitled) SetPageID(t xml.StartElement) (be builder, err error) {
 
 	if bs.IsValidPage(pageID) {
 		be = &bSummary{
-			bTitled: *bs,
-			PageID:  pageID,
+			bTitled:   *bs,
+			PageID:    pageID,
+			revisions: map[uint32][]revision{},
 		}
 	} else {
 		bs.Decoder.Skip() //skip page
@@ -189,7 +189,7 @@ type bSummary struct {
 	bTitled
 	PageID uint32
 
-	revisions []Revision
+	revisions map[uint32][]revision
 }
 
 func (bs *bSummary) SetPageID(t xml.StartElement) (be builder, err error) {
@@ -204,35 +204,49 @@ func (bs *bSummary) AddRevision(t xml.StartElement) (be builder, err error) {
 	}
 
 	//convert time
-	var timestamp time.Time
 	const layout = "2006-01-02T15:04:05Z"
-	timestamp, err = time.Parse(layout, r.Timestamp)
+	r.timestamp, err = time.Parse(layout, r.Timestamp)
+	r.Timestamp = ""
 
-	bs.revisions = append(bs.revisions, Revision{
-		ID:        r.ID,
-		UserID:    r.Contributor.ID,
-		Weight:    bs.Weighter(r.Text),
-		SHA1:      r.SHA1,
-		Timestamp: timestamp,
-	})
+	//weight text
+	r.weight, r.Text = bs.Weighter(r.Text), ""
+
+	rr := append(bs.revisions[r.ParentID], append([]revision{r}, bs.revisions[r.ID]...)...)
+
+	delete(bs.revisions, r.ParentID)
+	delete(bs.revisions, r.ID)
+	bs.revisions[rr[0].ParentID] = rr
+	bs.revisions[rr[len(rr)-1].ID] = rr
 
 	be = bs
 	return
 }
 func (bs *bSummary) End() (be builder, s Summary, err error) {
-	sort.Sort(byTimeAndID(bs.revisions)) //Wikipedia BUG: in the dump some edits are not sorted.
-	s = Summary{bs.Title, bs.PageID, bs.revisions}
 	be = bs.New()
+	if len(bs.revisions) > 2 {
+		err = errors.New("Revisions doesn't form a single list for page " + bs.Title)
+		return
+	}
+	rr := make([]Revision, len(bs.revisions[0]))
+	for i, r := range bs.revisions[0] {
+		rr[i] = Revision{r.ID, r.Contributor.ID, r.weight, r.SHA1, r.timestamp}
+	}
+	s = Summary{bs.Title, bs.PageID, rr}
+
 	return
 }
 
 // A page revision.
 type revision struct {
 	ID          uint32      `xml:"id"`
+	ParentID    uint32      `xml:"parentid"`
 	Timestamp   string      `xml:"timestamp"`
 	Contributor contributor `xml:"contributor"`
 	Text        string      `xml:"text"`
 	SHA1        string      `xml:"sha1"`
+	//converted data
+	timestamp time.Time
+	weight    float64
 }
 
 // A revision contributor.
@@ -251,18 +265,4 @@ func xmlEvent(t xml.Token) string {
 	default:
 		return ""
 	}
-}
-
-type byTimeAndID []Revision
-
-func (p byTimeAndID) Len() int {
-	return len(p)
-}
-
-func (p byTimeAndID) Less(i, j int) bool {
-	return p[i].Timestamp.Before(p[j].Timestamp) && p[i].ID < p[j].ID
-}
-
-func (p byTimeAndID) Swap(i, j int) {
-	p[i], p[j] = p[j], p[i]
 }
