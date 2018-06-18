@@ -3,6 +3,7 @@ package wikibrief
 import (
 	"encoding/xml"
 	"io"
+	"sort"
 	"time"
 
 	"github.com/pkg/errors"
@@ -162,9 +163,8 @@ func (bs *bTitled) SetPageID(t xml.StartElement) (be builder, err error) {
 
 	if bs.IsValidPage(pageID) {
 		be = &bSummary{
-			bTitled:   *bs,
-			PageID:    pageID,
-			revisions: map[uint32][]revision{},
+			bTitled: *bs,
+			PageID:  pageID,
 		}
 	} else {
 		bs.Decoder.Skip() //skip page
@@ -189,7 +189,7 @@ type bSummary struct {
 	bTitled
 	PageID uint32
 
-	revisions map[uint32][]revision
+	revisions []revision
 }
 
 func (bs *bSummary) SetPageID(t xml.StartElement) (be builder, err error) {
@@ -211,24 +211,17 @@ func (bs *bSummary) AddRevision(t xml.StartElement) (be builder, err error) {
 	//weight text
 	r.weight, r.Text = bs.Weighter(r.Text), ""
 
-	rr := append(bs.revisions[r.ParentID], append([]revision{r}, bs.revisions[r.ID]...)...)
-
-	delete(bs.revisions, r.ParentID)
-	delete(bs.revisions, r.ID)
-	bs.revisions[rr[0].ParentID] = rr
-	bs.revisions[rr[len(rr)-1].ID] = rr
+	bs.revisions = append(bs.revisions, r)
 
 	be = bs
 	return
 }
 func (bs *bSummary) End() (be builder, s Summary, err error) {
 	be = bs.New()
-	if len(bs.revisions) > 2 {
-		err = errors.New("Revisions doesn't form a single list for page " + bs.Title)
-		return
-	}
-	rr := make([]Revision, len(bs.revisions[0]))
-	for i, r := range bs.revisions[0] {
+
+	sort.Sort(byParentIDAndTime(bs.revisions)) //Wikipedia BUG: in the dump some edits are not sorted.
+	rr := make([]Revision, len(bs.revisions))
+	for i, r := range bs.revisions {
 		rr[i] = Revision{r.ID, r.Contributor.ID, r.weight, r.SHA1, r.timestamp}
 	}
 	s = Summary{bs.Title, bs.PageID, rr}
@@ -265,4 +258,25 @@ func xmlEvent(t xml.Token) string {
 	default:
 		return ""
 	}
+}
+
+type byParentIDAndTime []revision
+
+func (p byParentIDAndTime) Len() int {
+	return len(p)
+}
+
+func (p byParentIDAndTime) Less(i, j int) bool {
+	ri, rj := p[i], p[j]
+	switch {
+	case ri.ID == rj.ParentID:
+		return true
+	case ri.ParentID == rj.ID:
+		return false
+	}
+	return ri.timestamp.Before(rj.timestamp)
+}
+
+func (p byParentIDAndTime) Swap(i, j int) {
+	p[i], p[j] = p[j], p[i]
 }
