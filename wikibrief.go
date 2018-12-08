@@ -34,7 +34,19 @@ func New(r io.Reader, isValidPage func(uint32) bool, weighter func(string) float
 				break
 			}
 		}
-		err = addStackTrace(err)
+
+		causer, errHasCause := err.(interface{ Cause() error })
+		switch {
+		case err == nil:
+			//do nothing
+		case err == io.EOF:
+			//do nothing
+		case errHasCause && causer.Cause() != nil:
+			//do nothing
+		default:
+			err = errors.WithStack(err)
+		}
+
 		return
 	}
 }
@@ -115,7 +127,7 @@ func (bs *bStarted) Start() (be builder, err error) { //no page nesting
 func (bs *bStarted) SetPageTitle(t xml.StartElement) (be builder, err error) {
 	var title string
 	if err = bs.Decoder.DecodeElement(&title, &t); err != nil {
-		err = addStackTrace(err)
+		err = errors.Wrap(err, "Error while decoding the title of a page")
 		return
 	}
 	be = &bTitled{
@@ -160,7 +172,7 @@ func (bs *bTitled) SetPageTitle(t xml.StartElement) (be builder, err error) { //
 func (bs *bTitled) SetPageID(t xml.StartElement) (be builder, err error) {
 	var pageID uint32
 	if err = bs.Decoder.DecodeElement(&pageID, &t); err != nil {
-		err = addStackTrace(err)
+		err = errors.Wrapf(err, "Error while decoding page ID in page '%s'", bs.Title)
 		return
 	}
 
@@ -203,14 +215,14 @@ func (bs *bSummary) SetPageID(t xml.StartElement) (be builder, err error) {
 func (bs *bSummary) AddRevision(t xml.StartElement) (be builder, err error) {
 	var r revision
 	if err = bs.Decoder.DecodeElement(&r, &t); err != nil {
-		err = addStackTrace(err)
+		err = errors.Wrapf(err, "Error while decoding the %vrd revision in page %v '%s'", len(bs.revisions)+2, bs.PageID, bs.Title)
 		return
 	}
 
 	//convert time
 	const layout = "2006-01-02T15:04:05Z"
 	r.timestamp, err = time.Parse(layout, r.Timestamp)
-	err = addStackTrace(err)
+	err = errors.Wrapf(err, "Error while decoding the timestamp %s of %vrd revision in page %v '%s'", r.timestamp, len(bs.revisions)+2, bs.PageID, bs.Title)
 	r.Timestamp = ""
 
 	//weight text
@@ -284,19 +296,4 @@ func (p byParentIDAndTime) Less(i, j int) bool {
 
 func (p byParentIDAndTime) Swap(i, j int) {
 	p[i], p[j] = p[j], p[i]
-}
-
-//addStackTrace eventually add stack trace
-func addStackTrace(err error) error {
-	_, errHasCause := err.(interface{ Cause() error })
-	switch {
-	case err == nil:
-		fallthrough
-	case err == io.EOF:
-		fallthrough
-	case errHasCause:
-		return err
-	default:
-		return errors.WithStack(err)
-	}
 }
