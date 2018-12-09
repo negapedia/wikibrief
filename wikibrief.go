@@ -2,16 +2,17 @@ package wikibrief
 
 import (
 	"encoding/xml"
+	"errors"
 	"io"
 	"sort"
 	"time"
 
-	"github.com/pkg/errors"
+	errorsOnSteroids "github.com/pkg/errors"
 )
 
 // New returns a wikipedia dump page summarizer reading from the given reader.
 func New(r io.Reader, isValidPage func(uint32) bool, weighter func(string) float64) func() (Summary, error) {
-	base := bBase{xml.NewDecoder(r), isValidPage, weighter}
+	base := bBase{xml.NewDecoder(r), isValidPage, weighter, 0}
 	return func() (s Summary, err error) {
 		b := base.New()
 		var t xml.Token
@@ -44,7 +45,7 @@ func New(r io.Reader, isValidPage func(uint32) bool, weighter func(string) float
 		case errHasCause && causer.Cause() != nil:
 			//do nothing
 		default:
-			err = errors.WithStack(err)
+			err = b.Wrapf(err, "Unexpected error in outer event loop")
 		}
 
 		return
@@ -69,6 +70,8 @@ type Revision struct {
 //AnonimousUserID is the UserID value assumed by revisions done by an anonimous user
 const AnonimousUserID uint32 = 0
 
+var errInvalidXML = errors.New("Invalid XML")
+
 type builder interface {
 	Start() (be builder, err error)
 	SetPageTitle(t xml.StartElement) (be builder, err error)
@@ -76,13 +79,18 @@ type builder interface {
 	AddRevision(t xml.StartElement) (be builder, err error)
 	End() (be builder, s Summary, err error)
 	Handle(t xml.Token) (err error)
+	Wrapf(err error, format string, args ...interface{}) error
 }
 
-//bBase is the base state builder //////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////
+
+//bBase is the base state builder
+
 type bBase struct {
 	Decoder     *xml.Decoder
 	IsValidPage func(uint32) bool
 	Weighter    func(string) float64
+	LastPageID  uint32 //used for error reporting purposes
 }
 
 func (bs *bBase) New() builder {
@@ -115,19 +123,25 @@ func (bs *bBase) Handle(t xml.Token) (err error) {
 	return
 }
 
-//bStarted is the state of the builder in which a new page start has been found////////////////////////////////////////////////////
+func (bs *bBase) Wrapf(err error, format string, args ...interface{}) error {
+	return errorsOnSteroids.Wrapf(err, format+" - last page ID %v", append(args, bs.LastPageID)...)
+}
+
+/////////////////////////////////////////////////////////////////////////////////////
+
+//bStarted is the state of the builder in which a new page start has been found
 type bStarted struct {
 	bBase
 }
 
 func (bs *bStarted) Start() (be builder, err error) { //no page nesting
-	err = errors.New("Error invalid xml (found tag <page> without matching </page>)")
+	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found tag <page> without matching </page>)")
 	return
 }
 func (bs *bStarted) SetPageTitle(t xml.StartElement) (be builder, err error) {
 	var title string
 	if err = bs.Decoder.DecodeElement(&title, &t); err != nil {
-		err = errors.Wrap(err, "Error while decoding the title of a page")
+		err = bs.Wrapf(err, "Error while decoding the title of a page")
 		return
 	}
 	be = &bTitled{
@@ -137,15 +151,15 @@ func (bs *bStarted) SetPageTitle(t xml.StartElement) (be builder, err error) {
 	return
 }
 func (bs *bStarted) SetPageID(t xml.StartElement) (be builder, err error) { //no obligatory element "title"
-	err = errors.New("Error invalid xml (not found obligatory element \"title\")")
+	err = bs.Wrapf(errInvalidXML, "Error invalid xml (not found obligatory element \"title\")")
 	return
 }
 func (bs *bStarted) AddRevision(t xml.StartElement) (be builder, err error) { //no obligatory element "title"
-	err = errors.New("Error invalid xml (not found obligatory element \"title\")")
+	err = bs.Wrapf(errInvalidXML, "Error invalid xml (not found obligatory element \"title\")")
 	return
 }
 func (bs *bStarted) End() (be builder, s Summary, err error) { //no obligatory element "title"
-	err = errors.New("Error invalid xml (not found obligatory element \"title\")")
+	err = bs.Wrapf(errInvalidXML, "Error invalid xml (not found obligatory element \"title\")")
 	return
 }
 func (bs *bStarted) Handle(t xml.Token) (err error) {
@@ -155,24 +169,30 @@ func (bs *bStarted) Handle(t xml.Token) (err error) {
 	return
 }
 
-//bTitled is the state of the builder in which has been set a title for the page /////////////////////////////////////////////////
+func (bs *bStarted) Wrapf(err error, format string, args ...interface{}) error {
+	return errorsOnSteroids.Wrapf(err, format+" - last page ID %v", append(args, bs.LastPageID)...)
+}
+
+/////////////////////////////////////////////////////////////////////////////////////
+
+//bTitled is the state of the builder in which has been set a title for the page
 type bTitled struct {
 	bStarted
 	Title string
 }
 
 func (bs *bTitled) Start() (be builder, err error) { //no page nesting
-	err = errors.New("Error invalid xml (found tag <page> without matching </page>)")
+	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found tag <page> without matching </page>)")
 	return
 }
 func (bs *bTitled) SetPageTitle(t xml.StartElement) (be builder, err error) { ////////////////
-	err = errors.New("Error invalid xml (found a page with two titles)")
+	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found a page with two titles)")
 	return
 }
 func (bs *bTitled) SetPageID(t xml.StartElement) (be builder, err error) {
 	var pageID uint32
 	if err = bs.Decoder.DecodeElement(&pageID, &t); err != nil {
-		err = errors.Wrapf(err, "Error while decoding page ID in page '%s'", bs.Title)
+		err = bs.Wrapf(err, "Error while decoding page ID in page '%s'", bs.Title)
 		return
 	}
 
@@ -185,6 +205,8 @@ func (bs *bTitled) SetPageID(t xml.StartElement) (be builder, err error) {
 		bs.Decoder.Skip() //skip page
 		be = bs.New()
 	}
+
+	bs.LastPageID = pageID //used for error reporting purposes
 	return
 }
 func (bs *bTitled) AddRevision(t xml.StartElement) (be builder, err error) {
@@ -199,7 +221,13 @@ func (bs *bTitled) End() (be builder, s Summary, err error) {
 	return
 }
 
-//bSummary is the state of the builder in which has been set a title and a page ID for the page //////////////////////////////////
+func (bs *bTitled) Wrapf(err error, format string, args ...interface{}) error {
+	return errorsOnSteroids.Wrapf(err, format+" - current page \"%s\", last page ID %v", append(args, bs.Title, bs.LastPageID)...)
+}
+
+/////////////////////////////////////////////////////////////////////////////////////
+
+//bSummary is the state of the builder in which has been set a title and a page ID for the page
 type bSummary struct {
 	bTitled
 	PageID uint32
@@ -208,21 +236,21 @@ type bSummary struct {
 }
 
 func (bs *bSummary) SetPageID(t xml.StartElement) (be builder, err error) {
-	err = errors.New("Error invalid xml (found a page with two ids)")
+	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found a page with two ids)")
 	return
 }
 
 func (bs *bSummary) AddRevision(t xml.StartElement) (be builder, err error) {
 	var r revision
 	if err = bs.Decoder.DecodeElement(&r, &t); err != nil {
-		err = errors.Wrapf(err, "Error while decoding the %vrd revision in page %v '%s'", len(bs.revisions)+2, bs.PageID, bs.Title)
+		err = bs.Wrapf(err, "Error while decoding the %vrd revision in page %v '%s'", len(bs.revisions)+2, bs.PageID, bs.Title)
 		return
 	}
 
 	//convert time
 	const layout = "2006-01-02T15:04:05Z"
 	r.timestamp, err = time.Parse(layout, r.Timestamp)
-	err = errors.Wrapf(err, "Error while decoding the timestamp %s of %vrd revision in page %v '%s'", r.timestamp, len(bs.revisions)+2, bs.PageID, bs.Title)
+	err = bs.Wrapf(err, "Error while decoding the timestamp %s of %vrd revision in page %v '%s'", r.timestamp, len(bs.revisions)+2, bs.PageID, bs.Title)
 	r.Timestamp = ""
 
 	//weight text
@@ -244,6 +272,10 @@ func (bs *bSummary) End() (be builder, s Summary, err error) {
 	s = Summary{bs.Title, bs.PageID, rr}
 
 	return
+}
+
+func (bs *bSummary) Wrapf(err error, format string, args ...interface{}) error {
+	return errorsOnSteroids.Wrapf(err, format+" - current page \"%s\" ID %v", append(args, bs.Title, bs.PageID)...)
 }
 
 // A page revision.
