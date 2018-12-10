@@ -12,7 +12,12 @@ import (
 
 // New returns a wikipedia dump page summarizer reading from the given reader.
 func New(r io.Reader, isValidPage func(uint32) bool, weighter func(string) float64) func() (Summary, error) {
-	base := bBase{xml.NewDecoder(r), isValidPage, weighter, 0}
+	filename := ""
+	if namer, ok := r.(interface{ Name() string }); ok {
+		filename = namer.Name()
+	}
+
+	base := bBase{xml.NewDecoder(r), isValidPage, weighter, 0, filename}
 	return func() (s Summary, err error) {
 		b := base.New()
 		var t xml.Token
@@ -91,6 +96,7 @@ type bBase struct {
 	IsValidPage func(uint32) bool
 	Weighter    func(string) float64
 	LastPageID  uint32 //used for error reporting purposes
+	Filename    string //used for error reporting purposes
 }
 
 func (bs *bBase) New() builder {
@@ -124,7 +130,7 @@ func (bs *bBase) Handle(t xml.Token) (err error) {
 }
 
 func (bs *bBase) Wrapf(err error, format string, args ...interface{}) error {
-	return errorsOnSteroids.Wrapf(err, format+" - last page ID %v", append(args, bs.LastPageID)...)
+	return errorsOnSteroids.Wrapf(err, format+" - last page ID %v in \"%s\"", append(args, bs.LastPageID, bs.Filename)...)
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -170,7 +176,7 @@ func (bs *bStarted) Handle(t xml.Token) (err error) {
 }
 
 func (bs *bStarted) Wrapf(err error, format string, args ...interface{}) error {
-	return errorsOnSteroids.Wrapf(err, format+" - last page ID %v", append(args, bs.LastPageID)...)
+	return errorsOnSteroids.Wrapf(err, format+" - last page ID %v in \"%s\"", append(args, bs.LastPageID, bs.Filename)...)
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -222,7 +228,7 @@ func (bs *bTitled) End() (be builder, s Summary, err error) {
 }
 
 func (bs *bTitled) Wrapf(err error, format string, args ...interface{}) error {
-	return errorsOnSteroids.Wrapf(err, format+" - current page \"%s\", last page ID %v", append(args, bs.Title, bs.LastPageID)...)
+	return errorsOnSteroids.Wrapf(err, format+" - current page \"%s\", last page ID %v in \"%s\"", append(args, bs.Title, bs.LastPageID, bs.Filename)...)
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -243,14 +249,14 @@ func (bs *bSummary) SetPageID(t xml.StartElement) (be builder, err error) {
 func (bs *bSummary) AddRevision(t xml.StartElement) (be builder, err error) {
 	var r revision
 	if err = bs.Decoder.DecodeElement(&r, &t); err != nil {
-		err = bs.Wrapf(err, "Error while decoding the %vrd revision in page %v '%s'", len(bs.revisions)+2, bs.PageID, bs.Title)
+		err = bs.Wrapf(err, "Error while decoding the %vrd revision", len(bs.revisions)+2, bs.PageID, bs.Title)
 		return
 	}
 
 	//convert time
 	const layout = "2006-01-02T15:04:05Z"
 	r.timestamp, err = time.Parse(layout, r.Timestamp)
-	err = bs.Wrapf(err, "Error while decoding the timestamp %s of %vrd revision in page %v '%s'", r.timestamp, len(bs.revisions)+2, bs.PageID, bs.Title)
+	err = bs.Wrapf(err, "Error while decoding the timestamp %s of %vrd revision", r.timestamp, len(bs.revisions)+2, bs.PageID, bs.Title)
 	r.Timestamp = ""
 
 	//weight text
@@ -275,7 +281,7 @@ func (bs *bSummary) End() (be builder, s Summary, err error) {
 }
 
 func (bs *bSummary) Wrapf(err error, format string, args ...interface{}) error {
-	return errorsOnSteroids.Wrapf(err, format+" - current page \"%s\" ID %v", append(args, bs.Title, bs.PageID)...)
+	return errorsOnSteroids.Wrapf(err, format+" - current page \"%s\" ID %v in \"%s\"", append(args, bs.Title, bs.PageID, bs.Filename)...)
 }
 
 // A page revision.
