@@ -3,7 +3,9 @@ package wikibrief
 import (
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"io"
+	"os"
 	"sort"
 	"time"
 
@@ -17,7 +19,7 @@ func New(r io.Reader, isValidPage func(uint32) bool, weighter func(string) float
 		filename = namer.Name()
 	}
 
-	base := bBase{xml.NewDecoder(r), isValidPage, weighter, 0, filename}
+	base := bBase{xml.NewDecoder(r), isValidPage, weighter, errorContext{0, filename}}
 	return func() (s Summary, err error) {
 		b := base.New()
 		var t xml.Token
@@ -92,11 +94,10 @@ type builder interface {
 //bBase is the base state builder
 
 type bBase struct {
-	Decoder     *xml.Decoder
-	IsValidPage func(uint32) bool
-	Weighter    func(string) float64
-	LastPageID  uint32 //used for error reporting purposes
-	Filename    string //used for error reporting purposes
+	Decoder      *xml.Decoder
+	IsValidPage  func(uint32) bool
+	Weighter     func(string) float64
+	ErrorContext errorContext
 }
 
 func (bs *bBase) New() builder {
@@ -130,7 +131,7 @@ func (bs *bBase) Handle(t xml.Token) (err error) {
 }
 
 func (bs *bBase) Wrapf(err error, format string, args ...interface{}) error {
-	return errorsOnSteroids.Wrapf(err, format+" - last page ID %v in \"%s\"", append(args, bs.LastPageID, bs.Filename)...)
+	return errorsOnSteroids.Wrapf(err, format+" - %v", append(args, bs.ErrorContext)...)
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -176,7 +177,7 @@ func (bs *bStarted) Handle(t xml.Token) (err error) {
 }
 
 func (bs *bStarted) Wrapf(err error, format string, args ...interface{}) error {
-	return errorsOnSteroids.Wrapf(err, format+" - last page ID %v in \"%s\"", append(args, bs.LastPageID, bs.Filename)...)
+	return errorsOnSteroids.Wrapf(err, format+" - %v", append(args, bs.ErrorContext)...)
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -212,7 +213,7 @@ func (bs *bTitled) SetPageID(t xml.StartElement) (be builder, err error) {
 		be = bs.New()
 	}
 
-	bs.LastPageID = pageID //used for error reporting purposes
+	bs.ErrorContext.LastPageID = pageID //used for error reporting purposes
 	return
 }
 func (bs *bTitled) AddRevision(t xml.StartElement) (be builder, err error) {
@@ -228,7 +229,7 @@ func (bs *bTitled) End() (be builder, s Summary, err error) {
 }
 
 func (bs *bTitled) Wrapf(err error, format string, args ...interface{}) error {
-	return errorsOnSteroids.Wrapf(err, format+" - current page \"%s\", last page ID %v in \"%s\"", append(args, bs.Title, bs.LastPageID, bs.Filename)...)
+	return errorsOnSteroids.Wrapf(err, format+" - current page \"%s\", %v", append(args, bs.Title, bs.ErrorContext)...)
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -281,7 +282,7 @@ func (bs *bSummary) End() (be builder, s Summary, err error) {
 }
 
 func (bs *bSummary) Wrapf(err error, format string, args ...interface{}) error {
-	return errorsOnSteroids.Wrapf(err, format+" - current page \"%s\" ID %v in \"%s\"", append(args, bs.Title, bs.PageID, bs.Filename)...)
+	return errorsOnSteroids.Wrapf(err, format+" - current page \"%s\" %v", append(args, bs.Title, bs.ErrorContext)...)
 }
 
 // A page revision.
@@ -334,4 +335,17 @@ func (p byParentIDAndTime) Less(i, j int) bool {
 
 func (p byParentIDAndTime) Swap(i, j int) {
 	p[i], p[j] = p[j], p[i]
+}
+
+type errorContext struct {
+	LastPageID uint32 //used for error reporting purposes
+	Filename   string //used for error reporting purposes
+}
+
+func (ec errorContext) String() string {
+	report := fmt.Sprintf("last page ID %v in \"%s\"", ec.LastPageID, ec.Filename)
+	if _, err := os.Stat(ec.Filename); os.IsNotExist(err) {
+		report += " - WARNING: file not found!"
+	}
+	return report
 }
