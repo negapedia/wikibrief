@@ -191,7 +191,7 @@ func (bs *bTitled) Start() (be builder, err error) { //no page nesting
 	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found tag <page> without matching </page>)")
 	return
 }
-func (bs *bTitled) SetPageTitle(t xml.StartElement) (be builder, err error) { ////////////////
+func (bs *bTitled) SetPageTitle(t xml.StartElement) (be builder, err error) {
 	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found a page with two titles)")
 	return
 }
@@ -249,14 +249,14 @@ func (bs *bSummary) SetPageID(t xml.StartElement) (be builder, err error) {
 func (bs *bSummary) AddRevision(t xml.StartElement) (be builder, err error) {
 	var r revision
 	if err = bs.Decoder.DecodeElement(&r, &t); err != nil {
-		err = bs.Wrapf(err, "Error while decoding the %vrd revision", len(bs.revisions)+2, bs.PageID, bs.Title)
+		err = bs.Wrapf(err, "Error while decoding the %vrd revision", len(bs.revisions)+2)
 		return
 	}
 
 	//convert time
 	const layout = "2006-01-02T15:04:05Z"
 	r.timestamp, err = time.Parse(layout, r.Timestamp)
-	err = bs.Wrapf(err, "Error while decoding the timestamp %s of %vrd revision", r.timestamp, len(bs.revisions)+2, bs.PageID, bs.Title)
+	err = bs.Wrapf(err, "Error while decoding the timestamp %s of %vrd revision", r.timestamp, len(bs.revisions)+2)
 	r.Timestamp = ""
 
 	//weight text
