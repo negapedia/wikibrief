@@ -249,7 +249,7 @@ func (bs *bSummary) SetPageID(t xml.StartElement) (be builder, err error) {
 func (bs *bSummary) AddRevision(t xml.StartElement) (be builder, err error) {
 	var r revision
 	if err = bs.Decoder.DecodeElement(&r, &t); err != nil {
-		err = bs.Wrapf(err, "Error while decoding the %vrd revision", len(bs.revisions)+2)
+		err = bs.Wrapf(err, "Error while decoding the %vth revision", len(bs.revisions)+2)
 		return
 	}
 
