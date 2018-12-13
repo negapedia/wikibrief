@@ -203,6 +203,8 @@ func (bs *bTitled) SetPageID(t xml.StartElement) (be builder, err error) {
 		return
 	}
 
+	bs.ErrorContext.LastPageID = pageID //used for error reporting purposes
+
 	if bs.IsValidPage(pageID) {
 		be = &bSummary{
 			bTitled: *bs,
@@ -213,7 +215,6 @@ func (bs *bTitled) SetPageID(t xml.StartElement) (be builder, err error) {
 		be = bs.New()
 	}
 
-	bs.ErrorContext.LastPageID = pageID //used for error reporting purposes
 	return
 }
 func (bs *bTitled) AddRevision(t xml.StartElement) (be builder, err error) {
