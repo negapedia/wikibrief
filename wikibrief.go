@@ -186,7 +186,7 @@ func (bs *bTitled) SetPageTitle(t xml.StartElement) (be builder, err error) {
 func (bs *bTitled) SetPageID(t xml.StartElement) (be builder, err error) {
 	var pageID uint32
 	if err = bs.Decoder.DecodeElement(&pageID, &t); err != nil {
-		err = bs.Wrapf(err, "Error while decoding page ID in page '%s'", bs.Title)
+		err = bs.Wrapf(err, "Error while decoding page ID")
 		return
 	}
 
@@ -201,7 +201,7 @@ func (bs *bTitled) SetPageID(t xml.StartElement) (be builder, err error) {
 	}
 
 	if err = bs.Decoder.Skip(); err != nil {
-		err = bs.Wrapf(err, "Error while skipping page '%s'", bs.Title)
+		err = bs.Wrapf(err, "Error while skipping page")
 		return
 	}
 
