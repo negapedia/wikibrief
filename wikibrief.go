@@ -19,7 +19,7 @@ func New(r io.Reader, isValidPage func(uint32) bool, weighter func(string) float
 		filename = namer.Name()
 	}
 
-	base := bBase{xml.NewDecoder(r), isValidPage, weighter, errorContext{0, filename}}
+	base := bBase{xml.NewDecoder(r), isValidPage, weighter, &errorContext{0, filename}}
 	return func() (s Summary, err error) {
 		b := base.New()
 		var t xml.Token
@@ -35,8 +35,8 @@ func New(r io.Reader, isValidPage func(uint32) bool, weighter func(string) float
 				b, err = b.AddRevision(t.(xml.StartElement))
 			case "page end":
 				b, s, err = b.End()
-			default:
-				err = b.Handle(t)
+				//default:
+				//Do nothing
 			}
 			if err != nil || len(s.Revisions) > 0 {
 				break
@@ -85,7 +85,6 @@ type builder interface {
 	SetPageID(t xml.StartElement) (be builder, err error)
 	AddRevision(t xml.StartElement) (be builder, err error)
 	End() (be builder, s Summary, err error)
-	Handle(t xml.Token) (err error)
 	Wrapf(err error, format string, args ...interface{}) error
 }
 
@@ -97,7 +96,7 @@ type bBase struct {
 	Decoder      *xml.Decoder
 	IsValidPage  func(uint32) bool
 	Weighter     func(string) float64
-	ErrorContext errorContext
+	ErrorContext *errorContext
 }
 
 func (bs *bBase) New() builder {
@@ -110,26 +109,21 @@ func (bs *bBase) Start() (be builder, err error) {
 	return
 }
 func (bs *bBase) SetPageTitle(t xml.StartElement) (be builder, err error) {
-	be = bs
+	err = bs.Wrapf(errInvalidXML, "Error invalid xml (not found obligatory element \"page\" before \"title\")")
 	return
 }
 func (bs *bBase) SetPageID(t xml.StartElement) (be builder, err error) {
-	be = bs
+	err = bs.Wrapf(errInvalidXML, "Error invalid xml (not found obligatory element \"page\" before \"id\")")
 	return
 }
 func (bs *bBase) AddRevision(t xml.StartElement) (be builder, err error) {
-	be = bs
+	err = bs.Wrapf(errInvalidXML, "Error invalid xml (not found obligatory element \"page\" before \"revision\")")
 	return
 }
 func (bs *bBase) End() (be builder, s Summary, err error) {
-	be = bs
+	err = bs.Wrapf(errInvalidXML, "Error invalid xml (not found obligatory element \"page\" start before end)")
 	return
 }
-func (bs *bBase) Handle(t xml.Token) (err error) {
-	//Do nothing
-	return
-}
-
 func (bs *bBase) Wrapf(err error, format string, args ...interface{}) error {
 	return errorsOnSteroids.Wrapf(err, format+" - %v", append(args, bs.ErrorContext)...)
 }
@@ -142,7 +136,7 @@ type bStarted struct {
 }
 
 func (bs *bStarted) Start() (be builder, err error) { //no page nesting
-	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found tag <page> without matching </page>)")
+	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found nested element page)")
 	return
 }
 func (bs *bStarted) SetPageTitle(t xml.StartElement) (be builder, err error) {
@@ -169,13 +163,6 @@ func (bs *bStarted) End() (be builder, s Summary, err error) { //no obligatory e
 	err = bs.Wrapf(errInvalidXML, "Error invalid xml (not found obligatory element \"title\")")
 	return
 }
-func (bs *bStarted) Handle(t xml.Token) (err error) {
-	if _, ok := t.(xml.StartElement); ok {
-		bs.Decoder.Skip() //Skipping not matching internal page elements
-	}
-	return
-}
-
 func (bs *bStarted) Wrapf(err error, format string, args ...interface{}) error {
 	return errorsOnSteroids.Wrapf(err, format+" - %v", append(args, bs.ErrorContext)...)
 }
@@ -189,7 +176,7 @@ type bTitled struct {
 }
 
 func (bs *bTitled) Start() (be builder, err error) { //no page nesting
-	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found tag <page> without matching </page>)")
+	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found nested element page)")
 	return
 }
 func (bs *bTitled) SetPageTitle(t xml.StartElement) (be builder, err error) {
@@ -210,25 +197,25 @@ func (bs *bTitled) SetPageID(t xml.StartElement) (be builder, err error) {
 			bTitled: *bs,
 			PageID:  pageID,
 		}
-	} else {
-		bs.Decoder.Skip() //skip page
-		be = bs.New()
+		return
 	}
 
+	if err = bs.Decoder.Skip(); err != nil {
+		err = bs.Wrapf(err, "Error while skipping page '%s'", bs.Title)
+		return
+	}
+
+	be = bs.New()
 	return
 }
 func (bs *bTitled) AddRevision(t xml.StartElement) (be builder, err error) {
-	//A page should contain an ID element, so we discard current page
-	bs.Decoder.Skip() //skip page
-	be = bs.New()
+	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found a page revision without finding previous page ID)")
 	return
 }
 func (bs *bTitled) End() (be builder, s Summary, err error) {
-	//A page should contain at least one revision, so we discard current page
-	be = bs.New()
+	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found a page end without finding previous page ID)")
 	return
 }
-
 func (bs *bTitled) Wrapf(err error, format string, args ...interface{}) error {
 	return errorsOnSteroids.Wrapf(err, format+" - current page \"%s\", %v", append(args, bs.Title, bs.ErrorContext)...)
 }
@@ -243,11 +230,18 @@ type bSummary struct {
 	revisions []revision
 }
 
+func (bs *bSummary) Start() (be builder, err error) { //no page nesting
+	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found nested element page)")
+	return
+}
+func (bs *bSummary) SetPageTitle(t xml.StartElement) (be builder, err error) {
+	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found a page with two titles)")
+	return
+}
 func (bs *bSummary) SetPageID(t xml.StartElement) (be builder, err error) {
 	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found a page with two ids)")
 	return
 }
-
 func (bs *bSummary) AddRevision(t xml.StartElement) (be builder, err error) {
 	var r revision
 	if err = bs.Decoder.DecodeElement(&r, &t); err != nil {
@@ -281,7 +275,6 @@ func (bs *bSummary) End() (be builder, s Summary, err error) {
 
 	return
 }
-
 func (bs *bSummary) Wrapf(err error, format string, args ...interface{}) error {
 	return errorsOnSteroids.Wrapf(err, format+" - current page \"%s\" %v", append(args, bs.Title, bs.ErrorContext)...)
 }
