@@ -1,77 +1,98 @@
 package wikibrief
 
 import (
+	"context"
 	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"sort"
 	"time"
+
+	"github.com/negapedia/wikibots"
 
 	errorsOnSteroids "github.com/pkg/errors"
 )
 
-// New returns a wikipedia dump page summarizer reading from the given reader.
-func New(r io.Reader, isValidPage func(uint32) bool, weighter func(string) float64) func() (Summary, error) {
-	filename := ""
-	if namer, ok := r.(interface{ Name() string }); ok {
-		filename = namer.Name()
+//EvolvingPage represents a wikipedia page that is being edited. Revisions is closed when there are no more revisions.
+type EvolvingPage struct {
+	PageID    uint32
+	Revisions <-chan Revision
+}
+
+//Revision represents a revision of a page.
+type Revision struct {
+	ID, UserID uint32
+	IsBot      bool
+	Text, SHA1 string
+	IsRevert   uint32
+	Timestamp  time.Time
+}
+
+//Transform digest a wikipedia dump into the output stream. OutStream will not be closed by Transform.
+func Transform(ctx context.Context, r io.Reader, isValid func(pageID uint32) bool, outStream chan<- EvolvingPage) (err error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	base, err := firstBuilder(ctx, r, isValid, outStream)
+	if err != nil {
+		return
 	}
+	b := base.New()
 
-	base := bBase{xml.NewDecoder(r), isValidPage, weighter, &errorContext{0, filename}}
-	return func() (s Summary, err error) {
-		b := base.New()
-		var t xml.Token
-		for t, err = base.Decoder.Token(); err == nil; t, err = base.Decoder.Token() {
-			switch xmlEvent(t) {
-			case "page start":
-				b, err = b.Start()
-			case "title start":
-				b, err = b.SetPageTitle(t.(xml.StartElement))
-			case "id start":
-				b, err = b.SetPageID(t.(xml.StartElement))
-			case "revision start":
-				b, err = b.AddRevision(t.(xml.StartElement))
-			case "page end":
-				b, s, err = b.End()
-				//default:
-				//Do nothing
-			}
-			if err != nil || len(s.Revisions) > 0 {
-				break
-			}
-		}
-
+	defer func() { //Error handling
+		b.End() //Close eventually open revision channel
 		causer, errHasCause := err.(interface{ Cause() error })
 		switch {
-		case err == nil:
-			//do nothing
 		case err == io.EOF:
-			//do nothing
+			err = nil
 		case errHasCause && causer.Cause() != nil:
 			//do nothing
 		default:
 			err = b.Wrapf(err, "Unexpected error in outer event loop")
 		}
+	}()
 
+	var t xml.Token
+	for t, err = base.Decoder.Token(); err == nil; t, err = base.Decoder.Token() {
+		switch xmlEvent(t) {
+		case "page start":
+			b, err = b.Start()
+		case "id start":
+			b, err = b.NewPage(ctx, t.(xml.StartElement))
+		case "revision start":
+			b, err = b.NewRevision(ctx, t.(xml.StartElement))
+		case "page end":
+			b, err = b.End()
+		}
+	}
+
+	return
+}
+
+func firstBuilder(ctx context.Context, r io.Reader, isValid func(uint32) bool, outStream chan<- EvolvingPage) (base bBase, err error) {
+	decoder := xml.NewDecoder(r)
+	mediawikiToken, err := decoder.Token()
+	lang, errLang := language(mediawikiToken)
+	ID2Bot, errBot := wikibots.New(ctx, lang)
+	switch {
+	case err != nil:
+		return
+	case errLang != nil:
+		err = errLang
+		return
+	case errBot != nil:
+		err = errBot
 		return
 	}
-}
 
-//Summary represents a page summary.
-type Summary struct {
-	Title     string
-	PageID    uint32
-	Revisions []Revision
-}
+	filename := ""
+	if namer, ok := r.(interface{ Name() string }); ok {
+		filename = namer.Name()
+	}
 
-//Revision represent a revision of a page.
-type Revision struct {
-	ID, UserID uint32
-	Weight     float64
-	SHA1       string
-	Timestamp  time.Time
+	base = bBase{decoder, isValid, ID2Bot, outStream, &errorContext{0, filename}}
+	return
 }
 
 //AnonimousUserID is the UserID value assumed by revisions done by an anonimous user
@@ -81,10 +102,9 @@ var errInvalidXML = errors.New("Invalid XML")
 
 type builder interface {
 	Start() (be builder, err error)
-	SetPageTitle(t xml.StartElement) (be builder, err error)
-	SetPageID(t xml.StartElement) (be builder, err error)
-	AddRevision(t xml.StartElement) (be builder, err error)
-	End() (be builder, s Summary, err error)
+	NewPage(ctx context.Context, t xml.StartElement) (be builder, err error)
+	NewRevision(ctx context.Context, t xml.StartElement) (be builder, err error)
+	End() (be builder, err error)
 	Wrapf(err error, format string, args ...interface{}) error
 }
 
@@ -94,8 +114,9 @@ type builder interface {
 
 type bBase struct {
 	Decoder      *xml.Decoder
-	IsValidPage  func(uint32) bool
-	Weighter     func(string) float64
+	IsValid      func(pageID uint32) bool
+	ID2Bot       func(userID uint32) (username string, ok bool)
+	OutStream    chan<- EvolvingPage
 	ErrorContext *errorContext
 }
 
@@ -108,19 +129,15 @@ func (bs *bBase) Start() (be builder, err error) {
 	be = &bStarted{*bs}
 	return
 }
-func (bs *bBase) SetPageTitle(t xml.StartElement) (be builder, err error) {
-	err = bs.Wrapf(errInvalidXML, "Error invalid xml (not found obligatory element \"page\" before \"title\")")
-	return
-}
-func (bs *bBase) SetPageID(t xml.StartElement) (be builder, err error) {
+func (bs *bBase) NewPage(ctx context.Context, t xml.StartElement) (be builder, err error) {
 	err = bs.Wrapf(errInvalidXML, "Error invalid xml (not found obligatory element \"page\" before \"id\")")
 	return
 }
-func (bs *bBase) AddRevision(t xml.StartElement) (be builder, err error) {
+func (bs *bBase) NewRevision(ctx context.Context, t xml.StartElement) (be builder, err error) {
 	err = bs.Wrapf(errInvalidXML, "Error invalid xml (not found obligatory element \"page\" before \"revision\")")
 	return
 }
-func (bs *bBase) End() (be builder, s Summary, err error) {
+func (bs *bBase) End() (be builder, err error) {
 	err = bs.Wrapf(errInvalidXML, "Error invalid xml (not found obligatory element \"page\" start before end)")
 	return
 }
@@ -139,51 +156,7 @@ func (bs *bStarted) Start() (be builder, err error) { //no page nesting
 	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found nested element page)")
 	return
 }
-func (bs *bStarted) SetPageTitle(t xml.StartElement) (be builder, err error) {
-	var title string
-	if err = bs.Decoder.DecodeElement(&title, &t); err != nil {
-		err = bs.Wrapf(err, "Error while decoding the title of a page")
-		return
-	}
-	be = &bTitled{
-		bStarted: *bs,
-		Title:    title,
-	}
-	return
-}
-func (bs *bStarted) SetPageID(t xml.StartElement) (be builder, err error) { //no obligatory element "title"
-	err = bs.Wrapf(errInvalidXML, "Error invalid xml (not found obligatory element \"title\")")
-	return
-}
-func (bs *bStarted) AddRevision(t xml.StartElement) (be builder, err error) { //no obligatory element "title"
-	err = bs.Wrapf(errInvalidXML, "Error invalid xml (not found obligatory element \"title\")")
-	return
-}
-func (bs *bStarted) End() (be builder, s Summary, err error) { //no obligatory element "title"
-	err = bs.Wrapf(errInvalidXML, "Error invalid xml (not found obligatory element \"title\")")
-	return
-}
-func (bs *bStarted) Wrapf(err error, format string, args ...interface{}) error {
-	return errorsOnSteroids.Wrapf(err, format+" - %v", append(args, bs.ErrorContext)...)
-}
-
-/////////////////////////////////////////////////////////////////////////////////////
-
-//bTitled is the state of the builder in which has been set a title for the page
-type bTitled struct {
-	bStarted
-	Title string
-}
-
-func (bs *bTitled) Start() (be builder, err error) { //no page nesting
-	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found nested element page)")
-	return
-}
-func (bs *bTitled) SetPageTitle(t xml.StartElement) (be builder, err error) {
-	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found a page with two titles)")
-	return
-}
-func (bs *bTitled) SetPageID(t xml.StartElement) (be builder, err error) {
+func (bs *bStarted) NewPage(ctx context.Context, t xml.StartElement) (be builder, err error) {
 	var pageID uint32
 	if err = bs.Decoder.DecodeElement(&pageID, &t); err != nil {
 		err = bs.Wrapf(err, "Error while decoding page ID")
@@ -192,12 +165,20 @@ func (bs *bTitled) SetPageID(t xml.StartElement) (be builder, err error) {
 
 	bs.ErrorContext.LastPageID = pageID //used for error reporting purposes
 
-	if bs.IsValidPage(pageID) {
-		be = &bSummary{
-			bTitled: *bs,
-			PageID:  pageID,
+	if bs.IsValid(pageID) {
+		revisions := make(chan Revision, 10)
+		select {
+		case <-ctx.Done():
+			err = bs.Wrapf(ctx.Err(), "Context cancelled")
+			return
+		case bs.OutStream <- EvolvingPage{pageID, revisions}:
+			be = &bSetted{
+				bStarted:      *bs,
+				Revisions:     revisions,
+				SHA12SerialID: map[string]uint32{},
+			}
+			return
 		}
-		return
 	}
 
 	if err = bs.Decoder.Skip(); err != nil {
@@ -208,95 +189,102 @@ func (bs *bTitled) SetPageID(t xml.StartElement) (be builder, err error) {
 	be = bs.New()
 	return
 }
-func (bs *bTitled) AddRevision(t xml.StartElement) (be builder, err error) {
+func (bs *bStarted) NewRevision(ctx context.Context, t xml.StartElement) (be builder, err error) { //no obligatory element "id"
 	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found a page revision without finding previous page ID)")
 	return
 }
-func (bs *bTitled) End() (be builder, s Summary, err error) {
+func (bs *bStarted) End() (be builder, err error) { //no obligatory element "id"
 	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found a page end without finding previous page ID)")
 	return
 }
-func (bs *bTitled) Wrapf(err error, format string, args ...interface{}) error {
-	return errorsOnSteroids.Wrapf(err, format+" - current page \"%s\", %v", append(args, bs.Title, bs.ErrorContext)...)
+func (bs *bStarted) Wrapf(err error, format string, args ...interface{}) error {
+	return errorsOnSteroids.Wrapf(err, format+" - %v", append(args, bs.ErrorContext)...)
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
 
-//bSummary is the state of the builder in which has been set a title and a page ID for the page
-type bSummary struct {
-	bTitled
-	PageID uint32
+//bSetted is the state of the builder in which has been set a page ID for the page
+type bSetted struct {
+	bStarted
 
-	revisions []revision
+	Revisions     chan Revision
+	RevisionCount uint32
+	SHA12SerialID map[string]uint32
 }
 
-func (bs *bSummary) Start() (be builder, err error) { //no page nesting
+func (bs *bSetted) Start() (be builder, err error) { //no page nesting
+	close(bs.Revisions)
 	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found nested element page)")
 	return
 }
-func (bs *bSummary) SetPageTitle(t xml.StartElement) (be builder, err error) {
-	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found a page with two titles)")
-	return
-}
-func (bs *bSummary) SetPageID(t xml.StartElement) (be builder, err error) {
+func (bs *bSetted) NewPage(ctx context.Context, t xml.StartElement) (be builder, err error) {
+	close(bs.Revisions)
 	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found a page with two ids)")
 	return
 }
-func (bs *bSummary) AddRevision(t xml.StartElement) (be builder, err error) {
+func (bs *bSetted) NewRevision(ctx context.Context, t xml.StartElement) (be builder, err error) {
+	defer func() {
+		if err != nil {
+			close(bs.Revisions)
+		}
+	}()
+
+	//parse revision
 	var r revision
 	if err = bs.Decoder.DecodeElement(&r, &t); err != nil {
-		err = bs.Wrapf(err, "Error while decoding the %vth revision", len(bs.revisions)+2)
+		err = bs.Wrapf(err, "Error while decoding the %vth revision", bs.RevisionCount+1)
 		return
+	}
+
+	//Calculate reverts
+	serialID, IsRevert := bs.RevisionCount, uint32(0)
+	oldSerialID, isRevert := bs.SHA12SerialID[r.SHA1]
+	switch {
+	case isRevert:
+		IsRevert = serialID - (oldSerialID + 1)
+		fallthrough
+	case len(r.SHA1) == 31:
+		bs.SHA12SerialID[r.SHA1] = serialID
 	}
 
 	//convert time
 	const layout = "2006-01-02T15:04:05Z"
-	r.timestamp, err = time.Parse(layout, r.Timestamp)
-	err = bs.Wrapf(err, "Error while decoding the timestamp %s of %vrd revision", r.timestamp, len(bs.revisions)+2)
+	timestamp, err := time.Parse(layout, r.Timestamp)
+	if err != nil {
+		err = bs.Wrapf(err, "Error while decoding the timestamp %s of %vth revision", r.Timestamp, bs.RevisionCount+1)
+		return
+	}
 	r.Timestamp = ""
 
-	//weight text
-	r.weight, r.Text = bs.Weighter(r.Text), ""
+	//Check if userID represents bot
+	_, isBot := bs.ID2Bot(r.UserID)
 
-	bs.revisions = append(bs.revisions, r)
+	bs.RevisionCount++
 
-	be = bs
-	return
-}
-func (bs *bSummary) End() (be builder, s Summary, err error) {
-	be = bs.New()
-
-	sort.Sort(byParentIDAndTime(bs.revisions)) //Wikipedia BUG: in the dump some edits are not sorted.
-	rr := make([]Revision, len(bs.revisions))
-	for i, r := range bs.revisions {
-		rr[i] = Revision{r.ID, r.Contributor.ID, r.weight, r.SHA1, r.timestamp}
+	select {
+	case <-ctx.Done():
+		err = bs.Wrapf(ctx.Err(), "Context cancelled")
+	case bs.Revisions <- Revision{r.ID, r.UserID, isBot, r.Text, r.SHA1, IsRevert, timestamp}:
+		be = bs
 	}
-	s = Summary{bs.Title, bs.PageID, rr}
 
 	return
 }
-func (bs *bSummary) Wrapf(err error, format string, args ...interface{}) error {
-	return errorsOnSteroids.Wrapf(err, format+" - current page \"%s\" %v", append(args, bs.Title, bs.ErrorContext)...)
+func (bs *bSetted) End() (be builder, err error) {
+	close(bs.Revisions)
+	be = bs.New()
+	return
 }
 
 // A page revision.
 type revision struct {
-	ID          uint32      `xml:"id"`
-	ParentID    uint32      `xml:"parentid"`
-	Timestamp   string      `xml:"timestamp"`
-	Contributor contributor `xml:"contributor"`
-	Text        string      `xml:"text"`
-	SHA1        string      `xml:"sha1"`
+	ID        uint32 `xml:"id"`
+	Timestamp string `xml:"timestamp"`
+	UserID    uint32 `xml:"contributor>id"`
+	Text      string `xml:"text"`
+	SHA1      string `xml:"sha1"`
 	//converted data
 	timestamp time.Time
-	weight    float64
-}
-
-// A revision contributor.
-type contributor struct {
-	ID       uint32 `xml:"id"`
-	Username string `xml:"username"`
-	IP       string `xml:"ip"`
 }
 
 func xmlEvent(t xml.Token) string {
@@ -310,25 +298,18 @@ func xmlEvent(t xml.Token) string {
 	}
 }
 
-type byParentIDAndTime []revision
-
-func (p byParentIDAndTime) Len() int {
-	return len(p)
-}
-
-func (p byParentIDAndTime) Less(i, j int) bool {
-	ri, rj := p[i], p[j]
-	switch {
-	case ri.ID == rj.ParentID:
-		return true
-	case ri.ParentID == rj.ID:
-		return false
+func language(t xml.Token) (lang string, err error) {
+	tstart, ok := t.(xml.StartElement)
+	if !ok {
+		return "", errorsOnSteroids.New("Not a start element")
 	}
-	return ri.timestamp.Before(rj.timestamp)
-}
 
-func (p byParentIDAndTime) Swap(i, j int) {
-	p[i], p[j] = p[j], p[i]
+	for _, attr := range tstart.Attr {
+		if attr.Name.Local == "lang" {
+			return attr.Value, nil
+		}
+	}
+	return "", errorsOnSteroids.New("Language not found")
 }
 
 type errorContext struct {
