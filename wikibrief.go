@@ -16,7 +16,9 @@ import (
 
 //EvolvingPage represents a wikipedia page that is being edited. Revisions is closed when there are no more revisions.
 type EvolvingPage struct {
-	PageID    uint32
+	PageID uint32
+	/*	Title, Abstract string
+		TopicID         uint32*/
 	Revisions <-chan Revision
 }
 
@@ -31,9 +33,6 @@ type Revision struct {
 
 //Transform digest a wikipedia dump into the output stream. OutStream will not be closed by Transform.
 func Transform(ctx context.Context, lang string, r io.Reader, isValid func(pageID uint32) bool, outStream chan<- EvolvingPage) (err error) {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
 	ID2Bot, err := wikibots.New(ctx, lang)
 	if err != nil {
 		return
@@ -44,34 +43,41 @@ func Transform(ctx context.Context, lang string, r io.Reader, isValid func(pageI
 		filename = namer.Name()
 	}
 
-	base := bBase{xml.NewDecoder(r), isValid, ID2Bot, outStream, &errorContext{0, filename}}
-	b := base.New()
+	return run(ctx, bBase{xml.NewDecoder(r), isValid, ID2Bot, outStream, &errorContext{0, filename}})
+}
 
-	defer func() { //Error handling
-		b.End() //Close eventually open revision channel
-		causer, errHasCause := err.(interface{ Cause() error })
-		switch {
-		case err == io.EOF:
-			err = nil
-		case errHasCause && causer.Cause() != nil:
-			//do nothing
-		default:
-			err = b.Wrapf(err, "Unexpected error in outer event loop")
-		}
-	}()
+func run(ctx context.Context, base bBase) (err error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	b := base.New()
+	defer b.ClosePage() //Close eventually open revision channel
 
 	var t xml.Token
 	for t, err = base.Decoder.Token(); err == nil; t, err = base.Decoder.Token() {
 		switch xmlEvent(t) {
 		case "page start":
-			b, err = b.Start()
+			b, err = b.NewPage()
 		case "id start":
-			b, err = b.NewPage(ctx, t.(xml.StartElement))
+			b, err = b.SetPageID(ctx, t.(xml.StartElement))
 		case "revision start":
 			b, err = b.NewRevision(ctx, t.(xml.StartElement))
 		case "page end":
-			b, err = b.End()
+			b, err = b.ClosePage()
 		}
+		if err != nil {
+			break
+		}
+	}
+
+	causer, errHasCause := err.(interface{ Cause() error })
+	switch {
+	case err == io.EOF:
+		err = nil
+	case errHasCause && causer.Cause() != nil:
+		//do nothing
+	default:
+		err = b.Wrapf(err, "Unexpected error in outer event loop")
 	}
 
 	return
@@ -83,10 +89,10 @@ const AnonimousUserID uint32 = 0
 var errInvalidXML = errors.New("Invalid XML")
 
 type builder interface {
-	Start() (be builder, err error)
-	NewPage(ctx context.Context, t xml.StartElement) (be builder, err error)
+	NewPage() (be builder, err error)
+	SetPageID(ctx context.Context, t xml.StartElement) (be builder, err error)
 	NewRevision(ctx context.Context, t xml.StartElement) (be builder, err error)
-	End() (be builder, err error)
+	ClosePage() (be builder, err error)
 	Wrapf(err error, format string, args ...interface{}) error
 }
 
@@ -107,11 +113,11 @@ func (bs *bBase) New() builder {
 	return &be
 }
 
-func (bs *bBase) Start() (be builder, err error) {
+func (bs *bBase) NewPage() (be builder, err error) {
 	be = &bStarted{*bs}
 	return
 }
-func (bs *bBase) NewPage(ctx context.Context, t xml.StartElement) (be builder, err error) {
+func (bs *bBase) SetPageID(ctx context.Context, t xml.StartElement) (be builder, err error) {
 	err = bs.Wrapf(errInvalidXML, "Error invalid xml (not found obligatory element \"page\" before \"id\")")
 	return
 }
@@ -119,7 +125,7 @@ func (bs *bBase) NewRevision(ctx context.Context, t xml.StartElement) (be builde
 	err = bs.Wrapf(errInvalidXML, "Error invalid xml (not found obligatory element \"page\" before \"revision\")")
 	return
 }
-func (bs *bBase) End() (be builder, err error) {
+func (bs *bBase) ClosePage() (be builder, err error) {
 	err = bs.Wrapf(errInvalidXML, "Error invalid xml (not found obligatory element \"page\" start before end)")
 	return
 }
@@ -134,11 +140,11 @@ type bStarted struct {
 	bBase
 }
 
-func (bs *bStarted) Start() (be builder, err error) { //no page nesting
+func (bs *bStarted) NewPage() (be builder, err error) { //no page nesting
 	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found nested element page)")
 	return
 }
-func (bs *bStarted) NewPage(ctx context.Context, t xml.StartElement) (be builder, err error) {
+func (bs *bStarted) SetPageID(ctx context.Context, t xml.StartElement) (be builder, err error) {
 	var pageID uint32
 	if err = bs.Decoder.DecodeElement(&pageID, &t); err != nil {
 		err = bs.Wrapf(err, "Error while decoding page ID")
@@ -175,7 +181,7 @@ func (bs *bStarted) NewRevision(ctx context.Context, t xml.StartElement) (be bui
 	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found a page revision without finding previous page ID)")
 	return
 }
-func (bs *bStarted) End() (be builder, err error) { //no obligatory element "id"
+func (bs *bStarted) ClosePage() (be builder, err error) { //no obligatory element "id"
 	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found a page end without finding previous page ID)")
 	return
 }
@@ -194,12 +200,12 @@ type bSetted struct {
 	SHA12SerialID map[string]uint32
 }
 
-func (bs *bSetted) Start() (be builder, err error) { //no page nesting
+func (bs *bSetted) NewPage() (be builder, err error) { //no page nesting
 	close(bs.Revisions)
 	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found nested element page)")
 	return
 }
-func (bs *bSetted) NewPage(ctx context.Context, t xml.StartElement) (be builder, err error) {
+func (bs *bSetted) SetPageID(ctx context.Context, t xml.StartElement) (be builder, err error) {
 	close(bs.Revisions)
 	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found a page with two ids)")
 	return
@@ -252,7 +258,7 @@ func (bs *bSetted) NewRevision(ctx context.Context, t xml.StartElement) (be buil
 
 	return
 }
-func (bs *bSetted) End() (be builder, err error) {
+func (bs *bSetted) ClosePage() (be builder, err error) {
 	close(bs.Revisions)
 	be = bs.New()
 	return
