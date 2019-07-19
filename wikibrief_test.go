@@ -18,7 +18,7 @@ func TestUnit(t *testing.T) {
 	ch := make(chan EvolvingPage)
 	go func() {
 		defer close(ch)
-		err := Transform(context.Background(), bytes.NewBuffer(b), func(uint32) bool { return true }, ch)
+		err := Transform(context.Background(), "en", bytes.NewBuffer(b), func(uint32) bool { return true }, ch)
 		if err != nil {
 			t.Error(err)
 		}

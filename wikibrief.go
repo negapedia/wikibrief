@@ -30,14 +30,21 @@ type Revision struct {
 }
 
 //Transform digest a wikipedia dump into the output stream. OutStream will not be closed by Transform.
-func Transform(ctx context.Context, r io.Reader, isValid func(pageID uint32) bool, outStream chan<- EvolvingPage) (err error) {
+func Transform(ctx context.Context, lang string, r io.Reader, isValid func(pageID uint32) bool, outStream chan<- EvolvingPage) (err error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	base, err := firstBuilder(ctx, r, isValid, outStream)
+	ID2Bot, err := wikibots.New(ctx, lang)
 	if err != nil {
 		return
 	}
+
+	filename := ""
+	if namer, ok := r.(interface{ Name() string }); ok {
+		filename = namer.Name()
+	}
+
+	base := bBase{xml.NewDecoder(r), isValid, ID2Bot, outStream, &errorContext{0, filename}}
 	b := base.New()
 
 	defer func() { //Error handling
@@ -67,31 +74,6 @@ func Transform(ctx context.Context, r io.Reader, isValid func(pageID uint32) boo
 		}
 	}
 
-	return
-}
-
-func firstBuilder(ctx context.Context, r io.Reader, isValid func(uint32) bool, outStream chan<- EvolvingPage) (base bBase, err error) {
-	decoder := xml.NewDecoder(r)
-	mediawikiToken, err := decoder.Token()
-	lang, errLang := language(mediawikiToken)
-	ID2Bot, errBot := wikibots.New(ctx, lang)
-	switch {
-	case err != nil:
-		return
-	case errLang != nil:
-		err = errLang
-		return
-	case errBot != nil:
-		err = errBot
-		return
-	}
-
-	filename := ""
-	if namer, ok := r.(interface{ Name() string }); ok {
-		filename = namer.Name()
-	}
-
-	base = bBase{decoder, isValid, ID2Bot, outStream, &errorContext{0, filename}}
 	return
 }
 
@@ -296,20 +278,6 @@ func xmlEvent(t xml.Token) string {
 	default:
 		return ""
 	}
-}
-
-func language(t xml.Token) (lang string, err error) {
-	tstart, ok := t.(xml.StartElement)
-	if !ok {
-		return "", errorsOnSteroids.New("Not a start element")
-	}
-
-	for _, attr := range tstart.Attr {
-		if attr.Name.Local == "lang" {
-			return attr.Value, nil
-		}
-	}
-	return "", errorsOnSteroids.New("Language not found")
 }
 
 type errorContext struct {
