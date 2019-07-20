@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/ebonetti/ctxutils"
@@ -16,13 +17,20 @@ func main() {
 	}()
 
 	ctx, fail := ctxutils.WithFail(context.Background())
-	for p := range wikibrief.New(ctx, fail, "/tmp", "it") {
-		go func(p wikibrief.EvolvingPage) {
-			for range p.Revisions {
-				//Do nothing
+	pages := wikibrief.New(ctx, fail, "/tmp", "it")
+	wg := sync.WaitGroup{}
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for p := range pages {
+				for range p.Revisions {
+					//Do nothing
+				}
 			}
-		}(p)
+		}()
 	}
+	wg.Wait()
 
 	if err := fail(nil); err != nil {
 		panic(err)

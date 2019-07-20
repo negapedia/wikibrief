@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/ebonetti/ctxutils"
@@ -16,16 +17,23 @@ import (
 
 func TestUnit(t *testing.T) {
 	ctx, fail := ctxutils.WithFail(context.Background())
-	for p := range New(ctx, fail, "/tmp", "zu") {
-		go func(p EvolvingPage) {
-			for range p.Revisions {
-				//Do nothing
+	pages := New(ctx, fail, "/tmp", "zu")
+	wg := sync.WaitGroup{}
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for p := range pages {
+				for range p.Revisions {
+					//Do nothing
+				}
 			}
-		}(p)
+		}()
 	}
+	wg.Wait()
 
 	if err := fail(nil); err != nil {
-		panic(err)
+		t.Error(err)
 	}
 }
 

@@ -33,7 +33,8 @@ func New(ctx context.Context, fail func(err error) error, tmpDir, lang string) <
 		return dummyPagesChan
 	}
 
-	latestDump, err := wikidump.Latest(tmpDir, lang, "metahistory7zdump", "pagetable", "redirecttable", "categorylinkstable", "pagelinkstable")
+	latestDump, err := wikidump.Latest(tmpDir, lang, "metahistory7zdump",
+		"pagetable", "redirecttable", "categorylinkstable", "pagelinkstable")
 	if err != nil {
 		fail(err)
 		return dummyPagesChan
@@ -94,8 +95,9 @@ type Revision struct {
 	Timestamp  time.Time
 }
 
-//Since there are 4 buffers in various form: 4*pageBufferSize is the maximum number of wikipedia pages in memory.
-//Since each page has a buffer of revisionBufferSize revisions, this means at each moment there is a maximum of 4*pageBufferSize*revisionBufferSize page texts in memory.
+//There are 4 buffers in various forms: 4*pageBufferSize is the maximum number of wikipedia pages in memory.
+//Each page has a buffer of revisionBufferSize revisions: this means that at each moment there is
+//a maximum of 4*pageBufferSize*revisionBufferSize page texts in memory.
 const (
 	pageBufferSize     = 50
 	revisionBufferSize = 200
