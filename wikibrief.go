@@ -7,19 +7,82 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 	"time"
 
+	"github.com/RoaringBitmap/roaring"
+	"github.com/ebonetti/wikiassignment"
+	"github.com/ebonetti/wikidump"
+	"github.com/remeh/sizedwaitgroup"
+
 	"github.com/negapedia/wikibots"
+	"github.com/negapedia/wikipage"
 
 	errorsOnSteroids "github.com/pkg/errors"
 )
 
+//New digest a wikipedia dump into the output stream.
+func New(ctx context.Context, fail func(err error) error, tmpDir, lang string) <-chan EvolvingPage {
+	//Default value to a closed channel
+	dummyPagesChan := make(chan EvolvingPage)
+	close(dummyPagesChan)
+
+	ID2Bot, err := wikibots.New(ctx, lang)
+	if err != nil {
+		fail(err)
+		return dummyPagesChan
+	}
+
+	latestDump, err := wikidump.Latest(tmpDir, lang, "metahistory7zdump", "pagetable", "redirecttable", "categorylinkstable", "pagelinkstable")
+	if err != nil {
+		fail(err)
+		return dummyPagesChan
+	}
+	it := latestDump.Open("metahistory7zdump")
+
+	article2TopicID, err := getArticle2TopicID(ctx, tmpDir, lang)
+	if err != nil {
+		fail(err)
+		return dummyPagesChan
+	}
+
+	simplePages := make(chan simpleEvolvingPage, pageBufferSize)
+	go func() {
+		defer close(simplePages)
+
+		//limit the number of workers to prevent system from killing 7zip instances
+		wg := sizedwaitgroup.New(pageBufferSize)
+
+		var r io.ReadCloser
+		for r, err = it(ctx); err == nil; r, err = it(ctx) {
+			if err = wg.AddWithContext(ctx); err != nil {
+				return //AddWithContext only fail if ctx is Done
+			}
+
+			go func(r io.ReadCloser) {
+				defer wg.Done()
+				defer r.Close()
+				err := run(ctx, bBase{xml.NewDecoder(r), article2TopicID, ID2Bot, simplePages, &errorContext{0, filename(r)}})
+				if err != nil {
+					fail(err)
+				}
+			}(r)
+		}
+		if err != io.EOF {
+			fail(err)
+		}
+		wg.Wait()
+	}()
+
+	return completeInfo(ctx, fail, lang, simplePages)
+}
+
 //EvolvingPage represents a wikipedia page that is being edited. Revisions is closed when there are no more revisions.
 type EvolvingPage struct {
-	PageID uint32
-	/*	Title, Abstract string
-		TopicID         uint32*/
-	Revisions <-chan Revision
+	PageID          uint32
+	Title, Abstract string
+	TopicID         uint32
+	Revisions       <-chan Revision
 }
 
 //Revision represents a revision of a page.
@@ -31,20 +94,12 @@ type Revision struct {
 	Timestamp  time.Time
 }
 
-//Transform digest a wikipedia dump into the output stream. OutStream will not be closed by Transform.
-func Transform(ctx context.Context, lang string, r io.Reader, isValid func(pageID uint32) bool, outStream chan<- EvolvingPage) (err error) {
-	ID2Bot, err := wikibots.New(ctx, lang)
-	if err != nil {
-		return
-	}
-
-	filename := ""
-	if namer, ok := r.(interface{ Name() string }); ok {
-		filename = namer.Name()
-	}
-
-	return run(ctx, bBase{xml.NewDecoder(r), isValid, ID2Bot, outStream, &errorContext{0, filename}})
-}
+//Since there are 4 buffers in various form: 4*pageBufferSize is the maximum number of wikipedia pages in memory.
+//Since each page has a buffer of revisionBufferSize revisions, this means at each moment there is a maximum of 4*pageBufferSize*revisionBufferSize page texts in memory.
+const (
+	pageBufferSize     = 100
+	revisionBufferSize = 100
+)
 
 func run(ctx context.Context, base bBase) (err error) {
 	ctx, cancel := context.WithCancel(ctx)
@@ -77,7 +132,7 @@ func run(ctx context.Context, base bBase) (err error) {
 	case errHasCause && causer.Cause() != nil:
 		//do nothing
 	default:
-		err = b.Wrapf(err, "Unexpected error in outer event loop")
+		err = b.Wrapf(err, "Unexpected error in outer XML Decoder event loop")
 	}
 
 	return
@@ -101,11 +156,16 @@ type builder interface {
 //bBase is the base state builder
 
 type bBase struct {
-	Decoder      *xml.Decoder
-	IsValid      func(pageID uint32) bool
-	ID2Bot       func(userID uint32) (username string, ok bool)
-	OutStream    chan<- EvolvingPage
-	ErrorContext *errorContext
+	Decoder         *xml.Decoder
+	Article2TopicID func(articleID uint32) (topicID uint32, ok bool)
+	ID2Bot          func(userID uint32) (username string, ok bool)
+	OutStream       chan<- simpleEvolvingPage
+	ErrorContext    *errorContext
+}
+
+type simpleEvolvingPage struct {
+	PageID, TopicID uint32
+	Revisions       <-chan Revision
 }
 
 func (bs *bBase) New() builder {
@@ -153,13 +213,13 @@ func (bs *bStarted) SetPageID(ctx context.Context, t xml.StartElement) (be build
 
 	bs.ErrorContext.LastPageID = pageID //used for error reporting purposes
 
-	if bs.IsValid(pageID) {
-		revisions := make(chan Revision, 10)
+	if topicID, ok := bs.Article2TopicID(pageID); ok {
+		revisions := make(chan Revision, revisionBufferSize)
 		select {
 		case <-ctx.Done():
 			err = bs.Wrapf(ctx.Err(), "Context cancelled")
 			return
-		case bs.OutStream <- EvolvingPage{pageID, revisions}:
+		case bs.OutStream <- simpleEvolvingPage{pageID, topicID, revisions}:
 			be = &bSetted{
 				bStarted:      *bs,
 				Revisions:     revisions,
@@ -297,4 +357,68 @@ func (ec errorContext) String() string {
 		report += " - WARNING: file not found!"
 	}
 	return report
+}
+
+func filename(r io.Reader) (filename string) {
+	if namer, ok := r.(interface{ Name() string }); ok {
+		filename = namer.Name()
+	}
+	return
+}
+
+func getArticle2TopicID(ctx context.Context, tmpDir, lang string) (article2TopicID func(uint32) (uint32, bool), err error) {
+	article2Topic, namespaces, err := wikiassignment.From(ctx, tmpDir, lang)
+	if err != nil {
+		return
+	}
+
+	//Filter out non articles
+	articlesIDS := roaring.BitmapOf(namespaces.Articles...)
+	for pageID := range article2Topic {
+		if !articlesIDS.Contains(pageID) {
+			delete(article2Topic, pageID)
+		}
+	}
+
+	return func(articleID uint32) (topicID uint32, ok bool) {
+		topicID, ok = article2Topic[articleID]
+		return
+	}, nil
+}
+
+func completeInfo(ctx context.Context, fail func(err error) error, lang string, pages <-chan simpleEvolvingPage) <-chan EvolvingPage {
+	results := make(chan EvolvingPage, pageBufferSize)
+	go func() {
+		defer close(results)
+		wikiPage := wikipage.New(lang)
+		wg := sync.WaitGroup{}
+		for i := 0; i < pageBufferSize; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+			loop:
+				for p := range pages {
+					wp, err := wikiPage.From(ctx, p.PageID) //bottle neck - query to wikipedia api
+					_, NotFound := wikipage.NotFound(err)
+					switch {
+					case NotFound:
+						continue loop //Do nothing
+					case err != nil:
+						fail(err)
+						return
+					}
+
+					select {
+					case results <- EvolvingPage{p.PageID, wp.Title, wp.Abstract, p.TopicID, p.Revisions}:
+						//proceed
+					case <-ctx.Done():
+						return
+					}
+				}
+			}()
+		}
+		wg.Wait()
+	}()
+
+	return results
 }
