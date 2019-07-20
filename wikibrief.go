@@ -97,8 +97,14 @@ type Revision struct {
 //Since there are 4 buffers in various form: 4*pageBufferSize is the maximum number of wikipedia pages in memory.
 //Since each page has a buffer of revisionBufferSize revisions, this means at each moment there is a maximum of 4*pageBufferSize*revisionBufferSize page texts in memory.
 const (
-	pageBufferSize     = 100
-	revisionBufferSize = 100
+	pageBufferSize     = 50
+	revisionBufferSize = 200
+
+	// pageBufferSize     = 100
+	// revisionBufferSize = 100
+
+	// pageBufferSize     = 200
+	// revisionBufferSize = 50
 )
 
 func run(ctx context.Context, base bBase) (err error) {
