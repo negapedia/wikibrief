@@ -19,7 +19,7 @@ func TestUnit(t *testing.T) {
 	ctx, fail := ctxutils.WithFail(context.Background())
 	pages := New(ctx, fail, "/tmp", "zu")
 	wg := sync.WaitGroup{}
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 200; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

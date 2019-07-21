@@ -19,7 +19,7 @@ func main() {
 	ctx, fail := ctxutils.WithFail(context.Background())
 	pages := wikibrief.New(ctx, fail, "/tmp", "it")
 	wg := sync.WaitGroup{}
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 200; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
