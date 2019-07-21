@@ -404,6 +404,11 @@ func completeInfo(ctx context.Context, fail func(err error) error, lang string, 
 					_, NotFound := wikipage.NotFound(err)
 					switch {
 					case NotFound:
+						go func() {
+							for range p.Revisions {
+								//Empty revisions
+							}
+						}()
 						continue loop //Do nothing
 					case err != nil:
 						fail(err)
