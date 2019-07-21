@@ -21,7 +21,9 @@ import (
 	errorsOnSteroids "github.com/pkg/errors"
 )
 
-//New digest a wikipedia dump into the output stream.
+//New digest the latest wikipedia dump of the specified language into the output channel.
+//The revision channel of each page must be exhausted, doing otherwise may result in a deadlock.
+//The ctx and fail together should behave in the same manner as if created with WithFail - https://godoc.org/github.com/ebonetti/ctxutils#WithFail
 func New(ctx context.Context, fail func(err error) error, tmpDir, lang string) <-chan EvolvingPage {
 	//Default value to a closed channel
 	dummyPagesChan := make(chan EvolvingPage)
@@ -79,6 +81,7 @@ func New(ctx context.Context, fail func(err error) error, tmpDir, lang string) <
 }
 
 //EvolvingPage represents a wikipedia page that is being edited. Revisions is closed when there are no more revisions.
+//Revision channel must be exhausted, doing otherwise may result in a deadlock.
 type EvolvingPage struct {
 	PageID          uint32
 	Title, Abstract string
@@ -99,8 +102,8 @@ type Revision struct {
 //Each page has a buffer of revisionBufferSize revisions: this means that at each moment there is
 //a maximum of 4*pageBufferSize*revisionBufferSize page texts in memory.
 const (
-	pageBufferSize     = 100
-	revisionBufferSize = 1000
+	pageBufferSize     = 50
+	revisionBufferSize = 250
 )
 
 func run(ctx context.Context, base bBase) (err error) {
@@ -400,16 +403,15 @@ func completeInfo(ctx context.Context, fail func(err error) error, lang string, 
 				defer wg.Done()
 			loop:
 				for p := range pages {
-					wp, err := wikiPage.From(ctx, p.PageID) //bottle neck - query to wikipedia api
+					wp, err := wikiPage.From(ctx, p.PageID) //bottle neck: query to wikipedia api for each page
 					_, NotFound := wikipage.NotFound(err)
 					switch {
 					case NotFound:
-						go func() {
-							for range p.Revisions {
-								//Empty revisions
-							}
-						}()
-						continue loop //Do nothing
+						for range p.Revisions {
+							//Empty revision channel using the same goroutine:
+							//if some error arises is caught by fail
+						}
+						continue loop
 					case err != nil:
 						fail(err)
 						return
