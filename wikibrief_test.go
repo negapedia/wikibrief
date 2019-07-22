@@ -58,7 +58,7 @@ func TestRun(t *testing.T) {
 		}
 	}()
 
-	var s Summary
+	var s summary
 	for page := range ch {
 		s.PageID = page.PageID
 		for r := range page.Revisions {
@@ -66,7 +66,7 @@ func TestRun(t *testing.T) {
 		}
 	}
 
-	var st Summary
+	var st summary
 	bSummary, err := base64.StdEncoding.DecodeString(encodedHolyGrailSummary)
 	errt := json.Unmarshal(bSummary, &st)
 
@@ -80,7 +80,7 @@ func TestRun(t *testing.T) {
 	}
 }
 
-type Summary struct {
+type summary struct {
 	PageID    uint32
 	Revisions []Revision
 }

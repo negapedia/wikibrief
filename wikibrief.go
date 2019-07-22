@@ -22,7 +22,7 @@ import (
 )
 
 //New digest the latest wikipedia dump of the specified language into the output channel.
-//The revision channel of each page must be exhausted, doing otherwise may result in a deadlock.
+//The revision channel of each page must be exhausted (or the context cancelled), doing otherwise may result in a deadlock.
 //The ctx and fail together should behave in the same manner as if created with WithFail - https://godoc.org/github.com/ebonetti/ctxutils#WithFail
 func New(ctx context.Context, fail func(err error) error, tmpDir, lang string) <-chan EvolvingPage {
 	//Default value to a closed channel
@@ -81,7 +81,7 @@ func New(ctx context.Context, fail func(err error) error, tmpDir, lang string) <
 }
 
 //EvolvingPage represents a wikipedia page that is being edited. Revisions is closed when there are no more revisions.
-//Revision channel must be exhausted, doing otherwise may result in a deadlock.
+//Revision channel must be exhausted (or the context cancelled), doing otherwise may result in a deadlock.
 type EvolvingPage struct {
 	PageID          uint32
 	Title, Abstract string
