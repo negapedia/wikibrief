@@ -7,13 +7,13 @@ import (
 	errorsOnSteroids "github.com/pkg/errors"
 )
 
-//FanOut creates n copies of the given EvolvingPage channel; if n < 1, returns an error.
-func FanOut(ctx context.Context, in <-chan EvolvingPage, n int) (out []<-chan EvolvingPage, err error) {
+//FanOut creates n copies of the given EvolvingPage channel; if n < 1 panics.
+func FanOut(ctx context.Context, in <-chan EvolvingPage, n int) (out []<-chan EvolvingPage) {
 	switch {
 	case n < 1:
-		return nil, errorsOnSteroids.Errorf("Invalid cardinality %v", n)
+		panic(errorsOnSteroids.New("fanout: len out of range"))
 	case n == 1:
-		return []<-chan EvolvingPage{in}, nil
+		return []<-chan EvolvingPage{in}
 	}
 
 	var result []chan<- EvolvingPage
@@ -25,7 +25,7 @@ func FanOut(ctx context.Context, in <-chan EvolvingPage, n int) (out []<-chan Ev
 
 	go fanOutPages(ctx, in, result)
 
-	return out, nil
+	return out
 }
 
 func fanOutPages(ctx context.Context, in <-chan EvolvingPage, out []chan<- EvolvingPage) {

@@ -17,7 +17,7 @@ import (
 
 func TestUnit(t *testing.T) {
 	ctx, fail := ctxutils.WithFail(context.Background())
-	pages := New(ctx, fail, "/tmp", "zu")
+	pages := New(ctx, fail, "/tmp", "zu", true)
 	wg := sync.WaitGroup{}
 	for i := 0; i < 200; i++ {
 		wg.Add(1)
@@ -33,20 +33,20 @@ func TestUnit(t *testing.T) {
 	wg.Wait()
 
 	if err := fail(nil); err != nil {
-		t.Error(err)
+		t.Fatalf("%+v", err)
 	}
 }
 
 func TestRun(t *testing.T) {
 	b, err := base64.StdEncoding.DecodeString(holyGrail)
 	if err != nil {
-		t.Error("Error in holyGrail encoding", err)
+		t.Fatalf("Error in holyGrail encoding %+v", err)
 	}
 
 	ctx := context.Background()
 	ID2Bot, err := wikibots.New(ctx, "en")
 	if err != nil {
-		t.Error(err)
+		t.Fatalf("%+v", err)
 	}
 
 	ch := make(chan simpleEvolvingPage)
@@ -54,7 +54,7 @@ func TestRun(t *testing.T) {
 		defer close(ch)
 		err := run(ctx, bBase{xml.NewDecoder(bytes.NewBuffer(b)), func(uint32) (uint32, bool) { return 0, true }, ID2Bot, ch, &errorContext{0, "holyGrail"}})
 		if err != nil {
-			t.Error(err)
+			t.Fatalf("%+v", err)
 		}
 	}()
 
@@ -72,11 +72,11 @@ func TestRun(t *testing.T) {
 
 	switch {
 	case err != nil:
-		t.Error("Error in holyGrail summary encoding", err)
+		t.Fatalf("Error in holyGrail summary encoding %+v", err)
 	case errt != nil:
-		t.Error("Error while loading summary test info", errt)
+		t.Fatalf("Error while loading summary test info %+v", err)
 	case !reflect.DeepEqual(s, st):
-		t.Error("Error different summaries")
+		t.Fatal("Error different summaries")
 	}
 }
 

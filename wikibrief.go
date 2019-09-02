@@ -11,11 +11,11 @@ import (
 	"time"
 
 	"github.com/RoaringBitmap/roaring"
-	"github.com/ebonetti/wikiassignment"
-	"github.com/ebonetti/wikidump"
 	"github.com/remeh/sizedwaitgroup"
 
+	"github.com/negapedia/wikiassignment"
 	"github.com/negapedia/wikibots"
+	"github.com/negapedia/wikidump"
 	"github.com/negapedia/wikipage"
 
 	errorsOnSteroids "github.com/pkg/errors"
@@ -24,7 +24,8 @@ import (
 //New digest the latest wikipedia dump of the specified language into the output channel.
 //The revision channel of each page must be exhausted (or the context cancelled), doing otherwise may result in a deadlock.
 //The ctx and fail together should behave in the same manner as if created with WithFail - https://godoc.org/github.com/ebonetti/ctxutils#WithFail
-func New(ctx context.Context, fail func(err error) error, tmpDir, lang string) <-chan EvolvingPage {
+//The condition restrict restricts the digest to just one dump file, used for testing purposes.
+func New(ctx context.Context, fail func(err error) error, tmpDir, lang string, restrict bool) <-chan EvolvingPage {
 	//Default value to a closed channel
 	dummyPagesChan := make(chan EvolvingPage)
 	close(dummyPagesChan)
@@ -41,7 +42,6 @@ func New(ctx context.Context, fail func(err error) error, tmpDir, lang string) <
 		fail(err)
 		return dummyPagesChan
 	}
-	it := latestDump.Open("metahistory7zdump")
 
 	article2TopicID, err := getArticle2TopicID(ctx, tmpDir, lang)
 	if err != nil {
@@ -56,8 +56,14 @@ func New(ctx context.Context, fail func(err error) error, tmpDir, lang string) <
 		//limit the number of workers to prevent system from killing 7zip instances
 		wg := sizedwaitgroup.New(pageBufferSize)
 
-		var r io.ReadCloser
-		for r, err = it(ctx); err == nil; r, err = it(ctx) {
+		it := latestDump.Open("metahistory7zdump")
+		r, err := it(ctx)
+		if restrict { //Use just one dump file for testing purposes
+			it = func(_ context.Context) (io.ReadCloser, error) {
+				return nil, io.EOF
+			}
+		}
+		for ; err == nil; r, err = it(ctx) {
 			if err = wg.AddWithContext(ctx); err != nil {
 				return //AddWithContext only fail if ctx is Done
 			}
@@ -407,10 +413,7 @@ func completeInfo(ctx context.Context, fail func(err error) error, lang string, 
 					_, NotFound := wikipage.NotFound(err)
 					switch {
 					case NotFound:
-						for range p.Revisions {
-							//Empty revision channel using the same goroutine:
-							//if some error arises is caught by fail
-						}
+						emptyRevisions(p.Revisions, &wg)
 						continue loop
 					case err != nil:
 						fail(err)
@@ -430,4 +433,15 @@ func completeInfo(ctx context.Context, fail func(err error) error, lang string, 
 	}()
 
 	return results
+}
+
+//Empty concurrently revision channel: wait goroutine so that if some error arises is caught by fail
+func emptyRevisions(revisions <-chan Revision, wg *sync.WaitGroup) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for range revisions {
+			//skip
+		}
+	}()
 }

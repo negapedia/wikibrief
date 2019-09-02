@@ -18,10 +18,7 @@ func TestFanOut(t *testing.T) {
 
 func testFanOutSetting(t *testing.T, nPages uint32, nOut int) {
 	pagesTest := generateSuperSimplePages(nPages)
-	outs, err := FanOut(context.Background(), superSimplePages2EvolvingPages(pagesTest), nOut)
-	if err != nil {
-		t.Error(err)
-	}
+	outs := FanOut(context.Background(), superSimplePages2EvolvingPages(pagesTest), nOut)
 
 	wg := sync.WaitGroup{}
 	for _, out := range outs {
