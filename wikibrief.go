@@ -64,8 +64,9 @@ func New(ctx context.Context, fail func(err error) error, tmpDir, lang string, r
 			}
 		}
 		for ; err == nil; r, err = it(ctx) {
-			if err = wg.AddWithContext(ctx); err != nil {
-				return //AddWithContext only fail if ctx is Done
+			if err = wg.AddWithContext(ctx); err != nil { //AddWithContext fails only if ctx is Done
+				r.Close()
+				break
 			}
 
 			go func(r io.ReadCloser) {
