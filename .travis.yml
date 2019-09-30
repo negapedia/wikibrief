@@ -2,10 +2,6 @@ dist: trusty
 
 language: go
 
-go:
-  - 1.13
-  - master
-
 notifications:
   email: false
 
@@ -15,6 +11,26 @@ addons:
     token:
       secure: "s58Lx+CYkUtBUUf32B9eJmhzjRt0GXiq7KtjA2+HilF0Xc5vib8YCB7/skF6wx2hK1fs0aq/nt02oHBrFH0CTkqxTcPS8J2lIRk0yC+0L5R4CwFbJslYiBdlOTljjxNZ6SwN9Y56iaI+wRt906YCzJ+EdYunWBxgw/rAe55KVABjUz0C6auP8Td5FzhssZYyjvpCv6KPzh8FmxaHQSSdk/baiGmsbehNf3W0TJVpkRcbMsrBx65sVEcHBj03xZTRlfByCgCTTH+YsTriH2QTb/Y7ytKASEts1Hm6ZHXR8NKv//HLD6h3eLHzLzzR3c+vUNXtnO5J+h0fIbi7LX2Xr2Xkd2JQIIWE142fihJqhB3kOudGIgR2D4w9LvnRW70A48rt1EWgFAFMlhv4kDImqFz7EB3TlF+cEQUhC9kFhBtlfYBoWi2rzSUQf3gF0OBxaLfX3nMriLhmJmMQQrarubUwgeZlXmzKxGDGTZWBTYPk5FMAmhn/YjuQewUEQ+StIVU50rxYy5MXDWP8lnMmrJ+b+i94t1dSYR5aNEma0VzxzC/1yzxpR6ceb0ylVdnBQzbuuZRsPszpOb8VTEUpSo08RzCA75N0bRX4o+dIb07yRkiTCadYcf8tTnbg7JWfutbfKtQ25dhMDaKKXqW2Ipypfjwhr6tQD3yimRlbZZA="
 
+sudo: required
+
+install: true
+
+services:
+  - docker
+
+before_install:
+  - docker pull ebonetti/golang-petsc
+  - |
+    docker build -t test-env -<<<'
+    FROM ebonetti/golang-petsc
+    RUN go get -t github.com/negapedia/wikibrief/...
+    WORKDIR /go/src/github.com/negapedia/wikibrief
+    '
+  - docker run -v $PWD/coverage:/go/src/github.com/negapedia/wikibrief/coverage -d --name test-env test-env sleep 600
+
 script:
-  - go test -race ./... -coverprofile=coverage.out
-  - sonar-scanner -Dsonar.projectKey=negapedia_wikibrief -Dsonar.projectName=wikibrief -Dsonar.projectVersion=1.0 -Dsonar.sources=. -Dsonar.tests=. -Dsonar.test.inclusions=**/*_test.go -Dsonar.go.coverage.reportPaths=coverage.out
+  - docker exec test-env go test -race ./... -coverprofile=coverage/coverage.out
+  - sonar-scanner -Dsonar.projectKey=negapedia_wikibrief -Dsonar.projectName=wikibrief -Dsonar.projectVersion=1.0 -Dsonar.sources=. -Dsonar.tests=. -Dsonar.test.inclusions=**/*_test.go -Dsonar.go.coverage.reportPaths=coverage/coverage.out
+
+after_script:
+- docker rm -f test-env
