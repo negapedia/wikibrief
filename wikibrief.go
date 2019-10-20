@@ -109,8 +109,8 @@ type Revision struct {
 //Each page has a buffer of revisionBufferSize revisions: this means that at each moment there is
 //a maximum of 4*pageBufferSize*revisionBufferSize page texts in memory.
 const (
-	pageBufferSize     = 50
-	revisionBufferSize = 250
+	pageBufferSize     = 40
+	revisionBufferSize = 300
 )
 
 func run(ctx context.Context, base bBase) (err error) {
