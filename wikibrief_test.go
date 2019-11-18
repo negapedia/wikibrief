@@ -49,10 +49,10 @@ func TestRun(t *testing.T) {
 		t.Fatalf("%+v", err)
 	}
 
-	ch := make(chan simpleEvolvingPage)
+	ch := make(chan EvolvingPage)
 	go func() {
 		defer close(ch)
-		err := run(ctx, bBase{xml.NewDecoder(bytes.NewBuffer(b)), func(uint32) (uint32, bool) { return 0, true }, ID2Bot, ch, &errorContext{0, "holyGrail"}})
+		err := run(ctx, bBase{xml.NewDecoder(bytes.NewBuffer(b)), func(uint32) (uint32, bool) { return 0, true }, ID2Bot, ch, &errorContext{"holyGrail", "holyGrail"}})
 		if err != nil {
 			t.Fatalf("%+v", err)
 		}

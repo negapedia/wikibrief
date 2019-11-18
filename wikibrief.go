@@ -49,7 +49,7 @@ func New(ctx context.Context, fail func(err error) error, tmpDir, lang string, r
 		return dummyPagesChan
 	}
 
-	simplePages := make(chan simpleEvolvingPage, pageBufferSize)
+	simplePages := make(chan EvolvingPage, pageBufferSize)
 	go func() {
 		defer close(simplePages)
 
@@ -72,7 +72,7 @@ func New(ctx context.Context, fail func(err error) error, tmpDir, lang string, r
 			go func(r io.ReadCloser) {
 				defer wg.Done()
 				defer r.Close()
-				err := run(ctx, bBase{xml.NewDecoder(r), article2TopicID, ID2Bot, simplePages, &errorContext{0, filename(r)}})
+				err := run(ctx, bBase{xml.NewDecoder(r), article2TopicID, ID2Bot, simplePages, &errorContext{"", filename(r)}})
 				if err != nil {
 					fail(err)
 				}
@@ -125,6 +125,8 @@ func run(ctx context.Context, base bBase) (err error) {
 		switch xmlEvent(t) {
 		case "page start":
 			b, err = b.NewPage()
+		case "title start":
+			b, err = b.SetPageTitle(ctx, t.(xml.StartElement))
 		case "id start":
 			b, err = b.SetPageID(ctx, t.(xml.StartElement))
 		case "revision start":
@@ -157,6 +159,7 @@ var errInvalidXML = errors.New("Invalid XML")
 
 type builder interface {
 	NewPage() (be builder, err error)
+	SetPageTitle(ctx context.Context, t xml.StartElement) (be builder, err error)
 	SetPageID(ctx context.Context, t xml.StartElement) (be builder, err error)
 	NewRevision(ctx context.Context, t xml.StartElement) (be builder, err error)
 	ClosePage() (be builder, err error)
@@ -171,13 +174,8 @@ type bBase struct {
 	Decoder         *xml.Decoder
 	Article2TopicID func(articleID uint32) (topicID uint32, ok bool)
 	ID2Bot          func(userID uint32) (username string, ok bool)
-	OutStream       chan<- simpleEvolvingPage
+	OutStream       chan<- EvolvingPage
 	ErrorContext    *errorContext
-}
-
-type simpleEvolvingPage struct {
-	PageID, TopicID uint32
-	Revisions       <-chan Revision
 }
 
 func (bs *bBase) New() builder {
@@ -189,6 +187,12 @@ func (bs *bBase) NewPage() (be builder, err error) {
 	be = &bStarted{*bs}
 	return
 }
+
+func (bs *bBase) SetPageTitle(ctx context.Context, t xml.StartElement) (be builder, err error) {
+	err = bs.Wrapf(errInvalidXML, "Error invalid xml (not found obligatory element \"page\" before \"title\")")
+	return
+}
+
 func (bs *bBase) SetPageID(ctx context.Context, t xml.StartElement) (be builder, err error) {
 	err = bs.Wrapf(errInvalidXML, "Error invalid xml (not found obligatory element \"page\" before \"id\")")
 	return
@@ -216,14 +220,62 @@ func (bs *bStarted) NewPage() (be builder, err error) { //no page nesting
 	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found nested element page)")
 	return
 }
-func (bs *bStarted) SetPageID(ctx context.Context, t xml.StartElement) (be builder, err error) {
+
+func (bs *bStarted) SetPageTitle(ctx context.Context, t xml.StartElement) (be builder, err error) {
+	var title string
+	if err = bs.Decoder.DecodeElement(&title, &t); err != nil {
+		err = bs.Wrapf(err, "Error while decoding the title of a page")
+		return
+	}
+
+	bs.ErrorContext.LastTitle = title //used for error reporting purposes
+
+	be = &bTitled{
+		bStarted: *bs,
+		Title:    title,
+	}
+	return
+}
+
+func (bs *bStarted) SetPageID(ctx context.Context, t xml.StartElement) (be builder, err error) { //no obligatory element "title"
+	err = bs.Wrapf(errInvalidXML, "Error invalid xml (not found obligatory element \"title\")")
+	return
+}
+func (bs *bStarted) AddRevision(ctx context.Context, t xml.StartElement) (be builder, err error) { //no obligatory element "title"
+	err = bs.Wrapf(errInvalidXML, "Error invalid xml (not found obligatory element \"title\")")
+	return
+}
+func (bs *bStarted) ClosePage() (be builder, err error) { //no obligatory element "title"
+	err = bs.Wrapf(errInvalidXML, "Error invalid xml (not found obligatory element \"title\")")
+	return
+}
+func (bs *bStarted) Wrapf(err error, format string, args ...interface{}) error {
+	return errorsOnSteroids.Wrapf(err, format+" - %v", append(args, bs.ErrorContext)...)
+}
+
+/////////////////////////////////////////////////////////////////////////////////////
+
+//bTitled is the state of the builder in which has been set a title for the page
+type bTitled struct {
+	bStarted
+	Title string
+}
+
+func (bs *bTitled) Start() (be builder, err error) { //no page nesting
+	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found nested element page)")
+	return
+}
+func (bs *bTitled) SetPageTitle(ctx context.Context, t xml.StartElement) (be builder, err error) {
+	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found a page with two titles)")
+	return
+}
+
+func (bs *bTitled) SetPageID(ctx context.Context, t xml.StartElement) (be builder, err error) {
 	var pageID uint32
 	if err = bs.Decoder.DecodeElement(&pageID, &t); err != nil {
 		err = bs.Wrapf(err, "Error while decoding page ID")
 		return
 	}
-
-	bs.ErrorContext.LastPageID = pageID //used for error reporting purposes
 
 	if topicID, ok := bs.Article2TopicID(pageID); ok {
 		revisions := make(chan Revision, revisionBufferSize)
@@ -231,9 +283,9 @@ func (bs *bStarted) SetPageID(ctx context.Context, t xml.StartElement) (be build
 		case <-ctx.Done():
 			err = bs.Wrapf(ctx.Err(), "Context cancelled")
 			return
-		case bs.OutStream <- simpleEvolvingPage{pageID, topicID, revisions}:
+		case bs.OutStream <- EvolvingPage{pageID, bs.Title, "", topicID, revisions}: //Use empty abstract, later filled by completeInfo
 			be = &bSetted{
-				bStarted:      *bs,
+				bTitled:       *bs,
 				Revisions:     revisions,
 				SHA12SerialID: map[string]uint32{},
 			}
@@ -249,15 +301,15 @@ func (bs *bStarted) SetPageID(ctx context.Context, t xml.StartElement) (be build
 	be = bs.New()
 	return
 }
-func (bs *bStarted) NewRevision(ctx context.Context, t xml.StartElement) (be builder, err error) { //no obligatory element "id"
+func (bs *bTitled) NewRevision(ctx context.Context, t xml.StartElement) (be builder, err error) { //no obligatory element "id"
 	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found a page revision without finding previous page ID)")
 	return
 }
-func (bs *bStarted) ClosePage() (be builder, err error) { //no obligatory element "id"
+func (bs *bTitled) ClosePage() (be builder, err error) { //no obligatory element "id"
 	err = bs.Wrapf(errInvalidXML, "Error invalid xml (found a page end without finding previous page ID)")
 	return
 }
-func (bs *bStarted) Wrapf(err error, format string, args ...interface{}) error {
+func (bs *bTitled) Wrapf(err error, format string, args ...interface{}) error {
 	return errorsOnSteroids.Wrapf(err, format+" - %v", append(args, bs.ErrorContext)...)
 }
 
@@ -265,7 +317,7 @@ func (bs *bStarted) Wrapf(err error, format string, args ...interface{}) error {
 
 //bSetted is the state of the builder in which has been set a page ID for the page
 type bSetted struct {
-	bStarted
+	bTitled
 
 	Revisions     chan Revision
 	RevisionCount uint32
@@ -359,12 +411,12 @@ func xmlEvent(t xml.Token) string {
 }
 
 type errorContext struct {
-	LastPageID uint32 //used for error reporting purposes
-	Filename   string //used for error reporting purposes
+	LastTitle string //used for error reporting purposes
+	Filename  string //used for error reporting purposes
 }
 
 func (ec errorContext) String() string {
-	report := fmt.Sprintf("last page ID %v in \"%s\"", ec.LastPageID, ec.Filename)
+	report := fmt.Sprintf("last title %v in \"%s\"", ec.LastTitle, ec.Filename)
 	if _, err := os.Stat(ec.Filename); os.IsNotExist(err) {
 		report += " - WARNING: file not found!"
 	}
@@ -398,7 +450,7 @@ func getArticle2TopicID(ctx context.Context, tmpDir, lang string) (article2Topic
 	}, nil
 }
 
-func completeInfo(ctx context.Context, fail func(err error) error, lang string, pages <-chan simpleEvolvingPage) <-chan EvolvingPage {
+func completeInfo(ctx context.Context, fail func(err error) error, lang string, pages <-chan EvolvingPage) <-chan EvolvingPage {
 	results := make(chan EvolvingPage, pageBufferSize)
 	go func() {
 		defer close(results)
@@ -410,9 +462,11 @@ func completeInfo(ctx context.Context, fail func(err error) error, lang string, 
 				defer wg.Done()
 			loop:
 				for p := range pages {
-					wp, err := wikiPage.From(ctx, p.PageID) //bottle neck: query to wikipedia api for each page
+					wp, err := wikiPage.From(ctx, p.Title) //bottle neck: query to wikipedia api for each page
 					_, NotFound := wikipage.NotFound(err)
 					switch {
+					case p.PageID != wp.ID: //It's a redirect, so it should be filtered
+						fallthrough
 					case NotFound:
 						emptyRevisions(p.Revisions, &wg)
 						continue loop
@@ -421,8 +475,10 @@ func completeInfo(ctx context.Context, fail func(err error) error, lang string, 
 						return
 					}
 
+					p.Abstract = wp.Abstract
+
 					select {
-					case results <- EvolvingPage{p.PageID, wp.Title, wp.Abstract, p.TopicID, p.Revisions}:
+					case results <- p:
 						//proceed
 					case <-ctx.Done():
 						return
