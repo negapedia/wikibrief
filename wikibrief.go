@@ -462,17 +462,15 @@ func completeInfo(ctx context.Context, fail func(err error) error, lang string, 
 				defer wg.Done()
 			loop:
 				for p := range pages {
-					wp, err := wikiPage.From(ctx, p.Title) //bottle neck: query to wikipedia api for each page
-					_, NotFound := wikipage.NotFound(err)
+					timeoutCtx, cancel := context.WithTimeout(ctx, 6*time.Hour)
+					wp, err := wikiPage.From(timeoutCtx, p.Title) //bottle neck: query to wikipedia api for each page
+					cancel()
 					switch {
-					case p.PageID != wp.ID: //It's a redirect, so it should be filtered
+					case err != nil: //Querying the summary returns an error, so the article should be filtered
 						fallthrough
-					case NotFound:
+					case p.PageID != wp.ID: //It's a redirect, so it should be filtered
 						emptyRevisions(p.Revisions, &wg)
 						continue loop
-					case err != nil:
-						fail(err)
-						return
 					}
 
 					p.Abstract = wp.Abstract
